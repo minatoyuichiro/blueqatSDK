@@ -107,6 +107,42 @@ JSONシリアライズ
 全ゲートが描画可能で、未知の（ユーザー登録）ゲートは ``UserWarning`` 付き
 で省略されます。
 
+名前付きゲートブロック
+----------------------
+
+実際のアルゴリズムはサブルーチンの入れ子です — Shorの位数発見は
+「初期化・制御剰余乗算・逆QFT」で構成され、それぞれがさらに小さな部品から
+できています。名前付きブロックはその構造を回路オブジェクトに保持したまま、
+実行には一切影響しません（各バックエンドは内部のゲートを透過的に見ます）:
+
+.. code-block:: python
+
+   c = Circuit(7)
+   with c.block("order-finding"):
+       with c.block("superposition"):
+           c.h[4, 5, 6]
+       with c.block("c-U^1"):
+           c.cswap[4, 2, 3].cswap[4, 1, 2].cswap[4, 0, 1]
+       # ライブラリ回路をブロックとして配置 (量子ビット4..6へシフト)
+       c.append_block("IQFT", qft_circuit(3).dagger(), offset=4)
+
+   print(c.tree())
+   # Circuit(7)
+   # └─ order-finding
+   #    ├─ superposition
+   #    │  └─ h[4, 5, 6]
+   #    ├─ c-U^1
+   #    │  └─ ...
+   #    └─ IQFT
+   #       └─ ...
+
+ブロックは任意に入れ子でき、 ``repr()`` と :meth:`~blueqat.circuit.Circuit.tree`
+に現れ、 :meth:`~blueqat.circuit.Circuit.dagger` では鏡像ブロック
+（ ``"order-finding†"`` ）として保存されます。 ``depth()`` / ``count_ops()``
+は中身のゲートを数え、 ``flatten()`` / JSONシリアライズはブロックを
+プレーンなゲート列に展開します（フラットなワイヤ形式には階層は残りません）。
+完全なプログラム例は ``examples/shor_15.py`` を参照してください。
+
 アンシラ量子ビット
 ------------------
 

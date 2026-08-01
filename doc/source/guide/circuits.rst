@@ -108,6 +108,43 @@ Drawing
 gate is drawable; unknown (user-registered) gates are omitted with a
 ``UserWarning``.
 
+Named gate blocks
+-----------------
+
+Real algorithms are nests of subroutines -- Shor's order finding is
+initialization, controlled modular multiplications and an inverse QFT, each
+built from smaller pieces. Named blocks keep that structure in the circuit
+object without changing execution (every backend transparently sees the
+inner gates):
+
+.. code-block:: python
+
+   c = Circuit(7)
+   with c.block("order-finding"):
+       with c.block("superposition"):
+           c.h[4, 5, 6]
+       with c.block("c-U^1"):
+           c.cswap[4, 2, 3].cswap[4, 1, 2].cswap[4, 0, 1]
+       # place a library circuit as a block, shifted to qubits 4..6
+       c.append_block("IQFT", qft_circuit(3).dagger(), offset=4)
+
+   print(c.tree())
+   # Circuit(7)
+   # └─ order-finding
+   #    ├─ superposition
+   #    │  └─ h[4, 5, 6]
+   #    ├─ c-U^1
+   #    │  └─ ...
+   #    └─ IQFT
+   #       └─ ...
+
+Blocks nest arbitrarily, show up in ``repr()`` and :meth:`~blueqat.circuit.Circuit.tree`,
+and survive :meth:`~blueqat.circuit.Circuit.dagger` as mirrored blocks
+(``"order-finding†"``). ``depth()`` / ``count_ops()`` count the contained
+gates; ``flatten()`` / JSON serialization expand blocks into plain gates
+(the flat wire format keeps no hierarchy). See ``examples/shor_15.py`` for a
+complete Shor-at-15 program written this way.
+
 Ancilla qubits
 --------------
 
