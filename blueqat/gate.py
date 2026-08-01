@@ -1114,6 +1114,62 @@ class Barrier(IFallbackOperation):
         return self
 
 
+class GateBlock(IFallbackOperation):
+    """A named group of operations, nestable to arbitrary depth.
+
+    Blocks give circuits the hierarchical structure of real algorithms
+    (Shor = init + modular exponentiation + inverse QFT, each built from
+    smaller blocks) without changing how they execute: every backend sees
+    the inner operations through `fallback()`, so simulation, QASM output
+    and transpilation are unaffected. The structure shows up in `repr()`
+    and in `Circuit.tree()`.
+
+    Build blocks with `Circuit.block(name)` (a context manager) or
+    `Circuit.append_block(name, subcircuit)`.
+    """
+    lowername = "block"
+
+    def __init__(self, name: str, ops: Optional[List['Operation']] = None):
+        super().__init__((), ())
+        self.name = str(name)
+        self.ops: List['Operation'] = list(ops) if ops is not None else []
+
+    @classmethod
+    def create(cls, targets: Targets, params: tuple, options: Optional[dict] = None) -> 'GateBlock':
+        raise ValueError(
+            "GateBlock is structural and can't be created from the gate set; "
+            "use Circuit.block(name) or Circuit.append_block(...).")
+
+    def fallback(self, _):
+        return self.ops
+
+    def dagger(self):
+        inner = []
+        for op in reversed(self.ops):
+            if not hasattr(op, 'dagger'):
+                raise ValueError(
+                    f"Cannot invert block '{self.name}': it contains a "
+                    f"non-invertible operation `{op.lowername}`.")
+            inner.append(op.dagger())
+        name = self.name[:-1] if self.name.endswith('†') else self.name + '†'
+        return GateBlock(name, inner)
+
+    def target_iter(self, n_qubits: int):
+        seen = set()
+        for op in self.ops:
+            if isinstance(op, GateBlock):
+                targets = op.target_iter(n_qubits)
+            else:
+                targets = op.target_iter(n_qubits)
+            for t in targets:
+                if t not in seen:
+                    seen.add(t)
+                    yield t
+
+    def __str__(self) -> str:
+        return f"block({self.name!r}, <{len(self.ops)} ops>)"
+
+
 class Measurement(Operation):
     """Measurement operation"""
     lowername = "measure"

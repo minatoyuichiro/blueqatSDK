@@ -187,14 +187,17 @@ class Circuit:
         vec, cnt = backend.run(self.ops, self.n_qubits, shots=1, returns='statevector_and_shots', **kwargs)
         return vec, next(iter(cnt))
 
-    def _expanded_applications(self):
+    def _expanded_applications(self, ops: Optional[list] = None):
         """Yield (lowername, qubit-tuple) for each atomic gate application,
-        expanding slices/multi-targets the same way the backends do."""
-        from .gate import (Barrier, Gate, Measurement, OneQubitGate, Reset,
-                           TwoQubitGate)
+        expanding slices/multi-targets (and recursing into named blocks) the
+        same way the backends do."""
+        from .gate import (Barrier, Gate, GateBlock, Measurement, OneQubitGate,
+                           Reset, TwoQubitGate)
         n_qubits = self.n_qubits
-        for op in self.ops:
-            if isinstance(op, Barrier):
+        for op in (self.ops if ops is None else ops):
+            if isinstance(op, GateBlock):
+                yield from self._expanded_applications(op.ops)
+            elif isinstance(op, Barrier):
                 yield op.lowername, tuple(op.target_iter(n_qubits))
             elif isinstance(op, (OneQubitGate, Measurement, Reset)):
                 for t in op.target_iter(n_qubits):
@@ -263,6 +266,81 @@ class Circuit:
             hamiltonian = hamiltonian.to_expr().simplify()
         return self.run(backend, hamiltonian=hamiltonian, **kwargs)
 
+    def block(self, name: str) -> '_BlockContext':
+        """Group the operations appended inside the `with` body into a named,
+        nestable block (as in the sub-circuits of Shor's algorithm):
+
+            c = Circuit(4)
+            with c.block("QFT"):
+                c.h[0].cphase(math.pi / 2)[0, 1]
+                ...
+
+        Blocks change nothing about execution -- every backend transparently
+        sees the inner gates -- but the structure is kept in `repr()`,
+        `Circuit.tree()`, and survives `dagger()` (as a mirrored block named
+        `name + '†'`)."""
+        return _BlockContext(self, name)
+
+    def append_block(self, name: str, subcircuit: 'Circuit',
+                     offset: int = 0) -> 'Circuit':
+        """Append an existing circuit as a named block.
+
+        `offset` shifts every qubit index of `subcircuit`, so a library
+        circuit built on qubits 0..k can be placed anywhere. (Shifting
+        resolves slice targets against `subcircuit.n_qubits` first.)"""
+        from .circuit_funcs.flatten import flatten
+        from .gate import GateBlock
+        if offset < 0:
+            raise ValueError('offset must not be negative.')
+        if offset == 0:
+            ops = [op for op in subcircuit.ops]
+            width = subcircuit.n_qubits
+        else:
+            flat = flatten(subcircuit)
+            ops = []
+            for op in flat.ops:
+                targets = op.targets
+                if isinstance(targets, int):
+                    shifted: Any = targets + offset
+                else:
+                    shifted = tuple(t + offset for t in targets)
+                options = None
+                if getattr(op, 'key', None) is not None:
+                    options = {'key': op.key}
+                    if op.duplicated is not None:
+                        options['duplicated'] = op.duplicated
+                ops.append(op.create(shifted, op.params, options))
+            width = flat.n_qubits + offset
+        self.ops.append(GateBlock(name, ops))
+        self.n_qubits = max(self.n_qubits, width)
+        return self
+
+    def tree(self) -> str:
+        """A text rendering of the circuit's nested block structure:
+
+            Circuit(4)
+            ├─ h[0]
+            └─ QFT
+               ├─ cphase(1.5708)[0, 1]
+               └─ ...
+        """
+        from .gate import GateBlock
+
+        def _lines(ops, prefix: str):
+            out = []
+            for i, op in enumerate(ops):
+                last = i == len(ops) - 1
+                branch = '└─ ' if last else '├─ '
+                cont = '   ' if last else '│  '
+                if isinstance(op, GateBlock):
+                    out.append(f'{prefix}{branch}{op.name}')
+                    out.extend(_lines(op.ops, prefix + cont))
+                else:
+                    out.append(f'{prefix}{branch}{op}')
+            return out
+
+        return '\n'.join([f'Circuit({self.n_qubits})'] + _lines(self.ops, ''))
+
     def ancilla(self, n: int = 1, pos: Optional[int] = None, stop: Optional[int] = None,
                 reset: bool = True) -> '_AncillaContext':
         """Context manager allocating temporary ancilla qubit(s) for use inside the `with` block.
@@ -289,6 +367,28 @@ class Circuit:
             indices = list(range(self.n_qubits, self.n_qubits + n))
             self.n_qubits += n
         return _AncillaContext(self, indices, reset)
+
+
+class _BlockContext:
+    """Context manager returned by `Circuit.block()`. On exit, the operations
+    appended inside the body are wrapped into a single named GateBlock
+    (supports nesting: an inner block closes before its enclosing one)."""
+    def __init__(self, circuit: Circuit, name: str) -> None:
+        self.circuit = circuit
+        self.name = name
+        self._start = 0
+
+    def __enter__(self) -> '_BlockContext':
+        self._start = len(self.circuit.ops)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        if exc_type is not None:
+            return
+        from .gate import GateBlock
+        inner = self.circuit.ops[self._start:]
+        del self.circuit.ops[self._start:]
+        self.circuit.ops.append(GateBlock(self.name, inner))
 
 
 class _AncillaContext:

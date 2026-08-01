@@ -39,7 +39,13 @@ def flatten(c: Circuit) -> Circuit:
     ops: List[g.Operation] = []
     
     for op in c.ops:
-        if isinstance(op, (g.OneQubitGate, g.Reset)):
+        if isinstance(op, g.GateBlock):
+            # 名前付きブロックは中身に展開する (フラット化で構造は失われる。
+            # JSONシリアライズ等のフラットなスキーマ向け)。
+            inner = flatten(Circuit(n_qubits, list(op.ops)))
+            ops.extend(inner.ops)
+
+        elif isinstance(op, (g.OneQubitGate, g.Reset)):
             ops.extend([
                 op.create(t, op.params, None) 
                 for t in op.target_iter(n_qubits)
