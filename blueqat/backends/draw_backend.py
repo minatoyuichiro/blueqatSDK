@@ -449,16 +449,26 @@ class DrawCircuit(Backend):
     def run(self, gates, n_qubits, *args, **kwargs):
         """Blueqatのエントリーポイント"""
         import warnings
+        from ..gate import GateBlock
         gates, ctx = self._preprocess_run(gates, n_qubits, args, kwargs)
-        for gate in gates:
-            handler = getattr(self, f"gate_{gate.lowername}", None)
-            if handler is not None:
-                ctx = handler(gate, ctx)
-            else:
-                # 黙って省略すると「その操作が無い回路図」ができてしまうため、
-                # 描画されなかったことを必ず警告する。
-                warnings.warn(
-                    f"Gate '{gate.lowername}' is not supported by the draw "
-                    "backend and was omitted from the diagram.")
+
+        def _draw(ops, ctx):
+            for gate in ops:
+                if isinstance(gate, GateBlock):
+                    # ブロックは中身を展開して描画する (構造は tree() で見る)
+                    ctx = _draw(gate.ops, ctx)
+                    continue
+                handler = getattr(self, f"gate_{gate.lowername}", None)
+                if handler is not None:
+                    ctx = handler(gate, ctx)
+                else:
+                    # 黙って省略すると「その操作が無い回路図」ができてしまうため、
+                    # 描画されなかったことを必ず警告する。
+                    warnings.warn(
+                        f"Gate '{gate.lowername}' is not supported by the draw "
+                        "backend and was omitted from the diagram.")
+            return ctx
+
+        ctx = _draw(gates, ctx)
         self._postprocess_run(ctx)
         return ctx

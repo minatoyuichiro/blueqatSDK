@@ -59,9 +59,17 @@ class EOTranspiler(Backend):
 
     def run(self, gates: List[Operation], n_qubits: int, *args: Any,
             **kwargs: Any) -> Circuit:
+        from ..gate import GateBlock
         pulses: List[sequences.Pulse] = []
         for gate in gates:
             name = gate.lowername
+            if isinstance(gate, GateBlock):
+                # ブロックは中身を展開してトランスパイルする
+                sub = self.run(gate.ops, n_qubits)
+                for op in sub.ops:
+                    i, j = op.targets
+                    pulses.append(((int(i), int(j)), float(op.theta)))
+                continue
             if name in ('i', 'barrier'):
                 continue
             if name in self._FIXED:

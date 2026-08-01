@@ -22,6 +22,7 @@ Runnable scripts in [`examples/`](examples/):
 - `maxcut_qaoa.py` -- QAOA for the graph Max-Cut problem
 - `numpartition_qaoa.py` -- QAOA for number partitioning
 - `exchange_only.py` -- exchange-only spin qubits: logical circuits from pure exchange pulses
+- `shor_15.py` -- Shor's order finding for N=15 structured with nested named blocks
 
 ### Install
 ```
@@ -126,6 +127,21 @@ Circuit(4).x[:].run(hamiltonian=hamiltonian)
 
 # Or the equivalent convenience method (differentiable):
 Circuit(4).x[:].expect(hamiltonian)
+```
+
+### Named gate blocks (nested subcircuits)
+```python
+c = Circuit(7)
+with c.block("order-finding"):
+    with c.block("superposition"):
+        c.h[4, 5, 6]
+    with c.block("c-U^1"):
+        c.cswap[4, 2, 3].cswap[4, 1, 2].cswap[4, 0, 1]
+    c.append_block("IQFT", qft_circuit(3).dagger(), offset=4)
+
+print(c.tree())      # shows the nested structure (see examples/shor_15.py)
+c.run()              # backends see the plain gates -- execution is unchanged
+c.dagger()           # inverts blocks as blocks ("order-finding†")
 ```
 
 ### Probabilities, depth and gate counts
