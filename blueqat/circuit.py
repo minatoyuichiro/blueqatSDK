@@ -268,7 +268,7 @@ class Circuit:
 
     def block(self, name: str) -> '_BlockContext':
         """Group the operations appended inside the `with` body into a named,
-        nestable block (as in the sub-circuits of Shor's algorithm):
+        nestable block (as in the sub-circuits of Shor's algorithm)::
 
             c = Circuit(4)
             with c.block("QFT"):
@@ -327,7 +327,7 @@ class Circuit:
         return self
 
     def tree(self) -> str:
-        """A text rendering of the circuit's nested block structure:
+        """A text rendering of the circuit's nested block structure::
 
             Circuit(4)
             ├─ h[0]
