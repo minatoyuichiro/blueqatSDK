@@ -286,31 +286,42 @@ class Circuit:
         """Append an existing circuit as a named block.
 
         `offset` shifts every qubit index of `subcircuit`, so a library
-        circuit built on qubits 0..k can be placed anywhere. (Shifting
-        resolves slice targets against `subcircuit.n_qubits` first.)"""
+        circuit built on qubits 0..k can be placed anywhere. Shifting
+        resolves slice targets against `subcircuit.n_qubits` and preserves
+        any nested block structure inside `subcircuit`."""
         from .circuit_funcs.flatten import flatten
         from .gate import GateBlock
         if offset < 0:
             raise ValueError('offset must not be negative.')
+
+        n_sub = subcircuit.n_qubits
+
+        def _shift_ops(ops: list) -> list:
+            out = []
+            for op in ops:
+                if isinstance(op, GateBlock):
+                    out.append(GateBlock(op.name, _shift_ops(op.ops)))
+                    continue
+                # flatten a single op to resolve slices into explicit targets
+                for atom in flatten(Circuit(n_sub, [op])).ops:
+                    targets = atom.targets
+                    if isinstance(targets, int):
+                        shifted: Any = targets + offset
+                    else:
+                        shifted = tuple(t + offset for t in targets)
+                    options = None
+                    if getattr(atom, 'key', None) is not None:
+                        options = {'key': atom.key}
+                        if atom.duplicated is not None:
+                            options['duplicated'] = atom.duplicated
+                    out.append(atom.create(shifted, atom.params, options))
+            return out
+
         if offset == 0:
             ops = [op for op in subcircuit.ops]
-            width = subcircuit.n_qubits
         else:
-            flat = flatten(subcircuit)
-            ops = []
-            for op in flat.ops:
-                targets = op.targets
-                if isinstance(targets, int):
-                    shifted: Any = targets + offset
-                else:
-                    shifted = tuple(t + offset for t in targets)
-                options = None
-                if getattr(op, 'key', None) is not None:
-                    options = {'key': op.key}
-                    if op.duplicated is not None:
-                        options['duplicated'] = op.duplicated
-                ops.append(op.create(shifted, op.params, options))
-            width = flat.n_qubits + offset
+            ops = _shift_ops(subcircuit.ops)
+        width = n_sub + offset
         self.ops.append(GateBlock(name, ops))
         self.n_qubits = max(self.n_qubits, width)
         return self
