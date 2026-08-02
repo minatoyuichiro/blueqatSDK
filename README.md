@@ -142,6 +142,9 @@ with c.block("order-finding"):
 print(c.tree())      # shows the nested structure (see examples/shor_15.py)
 c.run()              # backends see the plain gates -- execution is unchanged
 c.dagger()           # inverts blocks as blocks ("order-finding†")
+
+c.run(backend="draw")                     # blocks drawn as labeled boxes
+c.run(backend="draw", expand_blocks=True) # ...or expanded into their gates
 ```
 
 ### Probabilities, depth and gate counts

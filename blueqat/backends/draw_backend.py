@@ -101,9 +101,15 @@ class DrawCircuit(Backend):
                 angles[qlist[i][j]['num']] = qlist[i][j]['angle']
                 
                 gate_name = qlist[i][j]['gate']
-                
+
+                if qlist[i][j]['type'] == 'block':
+                    # 名前付きブロック: 名前ラベル入りの大きめの薄紫ノードで
+                    # 「箱」を表す (関与する量子ビット間は縦線で結ばれる)
+                    labels[qlist[i][j]['num']] = gate_name
+                    colors[qlist[i][j]['num']] = '#B39DDB'
+                    sizes[qlist[i][j]['num']] = 2200
                 # 🛠️ 制御点（黒丸）の背後に文字が重なるバグを解消するため、空文字にする
-                if gate_name == '' or gate_name == 'CZ' or gate_name == 'CRZ':
+                elif gate_name == '' or gate_name == 'CZ' or gate_name == 'CRZ':
                     labels[qlist[i][j]['num']] = ''
                     colors[qlist[i][j]['num']] = 'black'
                     sizes[qlist[i][j]['num']] = 150  # 制御点の黒ドットサイズ
@@ -446,17 +452,62 @@ class DrawCircuit(Backend):
 
     gate_reset = _one_qubit_gate_noargs
 
+    def _gate_block(self, gate, ctx):
+        """名前付きブロックを1つの箱 (関与する全量子ビットにブロック名のノード
+        + 縦の結線) として描画する。"""
+        flg = ctx[2][-1]
+        time = ctx[3][-1]
+        qlist = ctx[0]
+
+        time_adjust = time%30
+        if time_adjust == 0:
+            for i in range(ctx[1]):
+                ypos_adjust = i * 1.5 + (math.floor(time/30)-1)*(ctx[1]+1)*1.5
+                qlist[i].append({'num': flg, 'gate': '', 'angle': '', 'xpos': 30, 'ypos': ypos_adjust, 'type': 'dummy'})
+                flg += 1
+            time += 1
+            for i in range(ctx[1]):
+                ypos_adjust = i * 1.5 + math.floor(time/30)*(ctx[1]+1)*1.5
+                qlist[i].append({'num': flg, 'gate': '', 'angle': '', 'xpos': 0, 'ypos': ypos_adjust, 'type': 'dummy'})
+                flg += 1
+                ctx[5].append((flg-1, flg-1-ctx[1]))
+
+        involved = sorted(set(gate.target_iter(ctx[1])))
+        if not involved:
+            return ctx
+
+        time_adjust = time%30
+        nums = []
+        for q in involved:
+            qlist[q].append({'num': flg, 'gate': gate.name, 'angle': '',
+                             'xpos': time_adjust,
+                             'ypos': q * 1.5 + math.floor(time/30)*(ctx[1]+1)*1.5,
+                             'type': 'block'})
+            nums.append(flg)
+            flg += 1
+        for a, b in zip(nums, nums[1:]):
+            ctx[4].append((a, b))
+        ctx[2].append(flg)
+        ctx[3].append(time+1)
+        return ctx
+
     def run(self, gates, n_qubits, *args, **kwargs):
-        """Blueqatのエントリーポイント"""
+        """Blueqatのエントリーポイント。
+
+        名前付きブロック (GateBlock) はデフォルトでは1つの箱として描画される。
+        中身のゲートまで描画したいときは `expand_blocks=True` を渡す。"""
         import warnings
         from ..gate import GateBlock
+        expand_blocks = kwargs.get('expand_blocks', False)
         gates, ctx = self._preprocess_run(gates, n_qubits, args, kwargs)
 
         def _draw(ops, ctx):
             for gate in ops:
                 if isinstance(gate, GateBlock):
-                    # ブロックは中身を展開して描画する (構造は tree() で見る)
-                    ctx = _draw(gate.ops, ctx)
+                    if expand_blocks:
+                        ctx = _draw(gate.ops, ctx)
+                    else:
+                        ctx = self._gate_block(gate, ctx)
                     continue
                 handler = getattr(self, f"gate_{gate.lowername}", None)
                 if handler is not None:
