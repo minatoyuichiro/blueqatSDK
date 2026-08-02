@@ -132,6 +132,38 @@ def eo_transpile(qasm: str) -> Dict[str, Any]:
             "pulses_preview": sched["pulses"][:10]}
 
 
+def cloud_run_circuit(qasm: str, shots: Optional[int] = None,
+                      hamiltonian: Optional[str] = None,
+                      mode: str = "tensornet") -> Dict[str, Any]:
+    """Run a circuit on the Blueqat cloud (qapi.blueqat.app) instead of the
+    local simulator. Needs a Blueqat API key (BLUEQAT_API_KEY or
+    blueqat.cloud.save_api_key; get one at https://mcp.blueqat.app/login).
+
+    With `shots`: measurement counts. With `hamiltonian` (Pauli expression):
+    the expectation value. Otherwise: the statevector."""
+    from . import cloud
+    from .utils import parse_hamiltonian
+    c = _parse_circuit(qasm)
+    if hamiltonian is not None:
+        value = c.run(backend='cloud', hamiltonian=parse_hamiltonian(hamiltonian),
+                      mode=mode)
+        return {"expectation_value": float(value)}
+    if shots is not None:
+        counts = c.run(backend='cloud', shots=shots, mode=mode)
+        return {"counts": dict(counts), "shots": shots,
+                "note": "bitstring order: qubit 0 is the rightmost character."}
+    state = c.run(backend='cloud', mode=mode)
+    return {"n_qubits": c.n_qubits,
+            "statevector": [[float(z.real), float(z.imag)] for z in state.tolist()]}
+
+
+def cloud_hardware_status() -> Dict[str, Any]:
+    """Near-real-time status of the real quantum hardware behind the Blueqat
+    cloud (public; no API key needed)."""
+    from . import cloud
+    return cloud.hardware_status()
+
+
 def blueqat_info() -> Dict[str, Any]:
     """Version and capability summary of this blueqat installation."""
     return {
@@ -173,6 +205,8 @@ def build_server():
     server.tool()(circuit_stats)
     server.tool()(expectation_value)
     server.tool()(eo_transpile)
+    server.tool()(cloud_run_circuit)
+    server.tool()(cloud_hardware_status)
     server.tool()(blueqat_info)
 
     @server.tool()
