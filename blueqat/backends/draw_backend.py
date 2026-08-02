@@ -514,11 +514,14 @@ class DrawCircuit(Backend):
             depth = int(expand_blocks)
         gates, ctx = self._preprocess_run(gates, n_qubits, args, kwargs)
 
-        # 回路全体が単一ブロックの入れ子だけの場合、既定 (depth=0) では図が
-        # 箱1つになってしまうため、実際の構造が現れる階層まで自動で降りる。
+        # 回路全体が単一ブロックで、その中にさらにブロックがある場合 (Shor流の
+        # 全体包み)、既定 (depth=0) では図が箱1つになって構造が見えないため、
+        # 子ブロックが箱として現れる階層まで自動で降りる。サブブロックを持たない
+        # 単独ブロックはそのまま箱として描く。
         ops = list(gates)
         if expand_blocks is False:
-            while len(ops) == 1 and isinstance(ops[0], GateBlock):
+            while (len(ops) == 1 and isinstance(ops[0], GateBlock)
+                   and any(isinstance(o, GateBlock) for o in ops[0].ops)):
                 ops = list(ops[0].ops)
 
         def _draw(ops, ctx, remaining):
