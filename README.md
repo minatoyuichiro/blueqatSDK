@@ -184,6 +184,20 @@ seq_q = quantize_sequence(seq, step=2 * math.pi / 4096)
 schedule = to_schedule(physical)   # ASAP-parallel, JSON-ready pulse schedule
 ```
 
+### MCP server (use blueqat from Claude and other LLM clients)
+```
+pip install blueqat[mcp]
+```
+Register the `blueqat-mcp` command with an MCP client -- e.g. Claude Desktop's
+config:
+```json
+{ "mcpServers": { "blueqat": { "command": "blueqat-mcp" } } }
+```
+Tools: `run_circuit` (OpenQASM in, statevector/counts out), `circuit_stats`,
+`expectation_value` (Pauli-expression Hamiltonians like `"1.5*Z[0]*Z[1] - 0.5*X[0]"`),
+`draw_circuit` (diagram image), `eo_transpile` (exchange-only pulse compilation),
+`blueqat_info`. All inputs are parsed without `eval` -- safe for untrusted tool calls.
+
 ### Cloud access (API key groundwork)
 ```python
 import blueqat.cloud as cloud

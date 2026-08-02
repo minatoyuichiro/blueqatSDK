@@ -17,6 +17,7 @@ Refactored and merged into a unified utils.py module with robust Autograd tracki
 
 import cmath
 import math
+import re
 from collections import Counter, defaultdict, namedtuple
 from dataclasses import dataclass
 from functools import reduce
@@ -455,6 +456,55 @@ def commutator(expr1: Any, expr2: Any) -> 'Expr':
 def is_commutable(expr1: Any, expr2: Any, eps: float = 1e-8) -> bool:
     """Test whether expr1 and expr2 are commutable."""
     return sum((x * x.conjugate()).real for x in commutator(expr1, expr2).coeffs()) < eps
+
+_PAULI_TERM_RE = re.compile(r'([XYZI])\s*(?:\[\s*(\d+)\s*\]|(\d+))?')
+_PAULI_COEFF_RE = re.compile(r'^[+-]?\s*(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?')
+_PAULI_SPLIT_RE = re.compile(r'(?<![eE])(?=[+-])')
+
+
+def parse_hamiltonian(text: str) -> Expr:
+    """Parse a Pauli-expression string like ``"1.5*Z[0]*Z[1] - 0.5*X0 + 2"``
+    into an :class:`Expr`, without using `eval` (safe for untrusted input,
+    e.g. tool calls arriving over MCP).
+
+    Grammar: terms joined by ``+``/``-``; each term is an optional numeric
+    coefficient and a product of Pauli factors ``X/Y/Z/I`` with the qubit
+    index written as ``[n]`` or directly ``n``. ``*`` between factors is
+    optional. A term with no Pauli factor is a constant (times identity).
+    """
+    if not text or not text.strip():
+        raise ValueError('empty hamiltonian expression.')
+    total: Any = None
+    for raw_term in _PAULI_SPLIT_RE.split(text.replace(' ', '')):
+        term_src = raw_term.strip()
+        if not term_src:
+            continue
+        sign = -1.0 if term_src.startswith('-') else 1.0
+        body = term_src.lstrip('+-')
+        coeff = 1.0
+        m = _PAULI_COEFF_RE.match(body)
+        if m:
+            coeff = float(m.group(0))
+            body = body[m.end():]
+        body = body.lstrip('*')
+        term: Any = sign * coeff * I
+        consumed = 0
+        for pm in _PAULI_TERM_RE.finditer(body):
+            op, idx_a, idx_b = pm.groups()
+            idx = idx_a if idx_a is not None else idx_b
+            if op != 'I' and idx is None:
+                raise ValueError(
+                    f'Pauli factor {op!r} needs a qubit index in {raw_term!r}.')
+            if op != 'I':
+                term = term * pauli_from_char(op, int(idx))
+            consumed += len(pm.group(0))
+        if len(body.replace('*', '')) != consumed:
+            raise ValueError(f'Could not parse hamiltonian term: {raw_term!r}')
+        total = term if total is None else total + term
+    if total is None:
+        raise ValueError('empty hamiltonian expression.')
+    return total.to_expr().simplify()
+
 
 def qubo_bit(n: int) -> Expr:
     return 0.5 - 0.5 * Z[n]
