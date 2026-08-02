@@ -130,8 +130,35 @@ def test_block_draw_no_warning():
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
         _bell_with_block().run(backend='draw')
+        _bell_with_block().run(backend='draw', expand_blocks=True)
     plt.close('all')
     assert not [w for w in caught if 'omitted' in str(w.message)]
+
+
+def test_block_draw_as_box_by_default():
+    # Default: the block is rendered as one labeled box spanning its qubits.
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    ctx = _bell_with_block().run(backend='draw')
+    plt.close('all')
+    qlist = ctx[0]
+    block_nodes = [e for i in qlist for e in qlist[i] if e['type'] == 'block']
+    assert [e['gate'] for e in block_nodes] == ['Bell', 'Bell']  # one per qubit
+    gate_nodes = [e for i in qlist for e in qlist[i] if e['type'] == 'gate']
+    assert gate_nodes == []  # inner gates are hidden in box mode
+
+
+def test_block_draw_expand_blocks_shows_gates():
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    ctx = _bell_with_block().run(backend='draw', expand_blocks=True)
+    plt.close('all')
+    qlist = ctx[0]
+    assert not [e for i in qlist for e in qlist[i] if e['type'] == 'block']
+    gate_names = [e['gate'] for i in qlist for e in qlist[i] if e['type'] == 'gate']
+    assert 'H' in gate_names  # the Bell contents are drawn as plain gates
 
 
 def test_block_eo_transpile():
