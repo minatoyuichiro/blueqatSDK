@@ -143,10 +143,11 @@ and survive :meth:`~blueqat.circuit.Circuit.dagger` as mirrored blocks
 (``"order-finding†"``). ``depth()`` / ``count_ops()`` count the contained
 gates; ``flatten()`` / JSON serialization expand blocks into plain gates
 (the flat wire format keeps no hierarchy). The circuit drawer renders a
-block as a single labeled box spanning its qubits -- pass
-``run(backend='draw', expand_blocks=True)`` to draw the inner gates instead.
-See ``examples/shor_15.py`` for a complete Shor-at-15 program written this
-way.
+block as a single labeled box spanning its qubits; a circuit wrapped
+entirely in one block automatically descends so its child blocks appear as
+boxes. Pass ``expand_blocks=n`` to open ``n`` levels of blocks, or
+``expand_blocks=True`` to draw every inner gate. See
+``examples/shor_15.py`` for a complete Shor-at-15 program written this way.
 
 Ancilla qubits
 --------------

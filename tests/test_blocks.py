@@ -161,6 +161,52 @@ def test_block_draw_expand_blocks_shows_gates():
     assert 'H' in gate_names  # the Bell contents are drawn as plain gates
 
 
+def _block_labels(ctx):
+    qlist = ctx[0]
+    labels = []
+    for i in qlist:
+        for e in qlist[i]:
+            if e['type'] == 'block' and e['gate'] not in labels:
+                labels.append(e['gate'])
+    return labels
+
+
+def test_block_draw_auto_descends_singleton_wrapper():
+    # A circuit that is entirely one block (Shor-style) must not render as a
+    # single giant box: the drawer descends into singleton wrappers so the
+    # child blocks appear as boxes.
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    c = Circuit(2)
+    with c.block("whole"):
+        with c.block("a"):
+            c.h[0]
+        with c.block("b"):
+            c.cx[0, 1]
+    ctx = c.run(backend='draw')
+    plt.close('all')
+    assert set(_block_labels(ctx)) == {"a", "b"}
+
+
+def test_block_draw_integer_depth():
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    c = Circuit(2)
+    with c.block("outer"):
+        c.h[0]
+        with c.block("inner"):
+            c.cx[0, 1]
+    # depth=1: outer is expanded one level; inner shows as a box.
+    ctx = c.run(backend='draw', expand_blocks=1)
+    plt.close('all')
+    assert _block_labels(ctx) == ["inner"]
+    qlist = ctx[0]
+    gate_names = [e['gate'] for i in qlist for e in qlist[i] if e['type'] == 'gate']
+    assert 'H' in gate_names
+
+
 def test_block_eo_transpile():
     import blueqat.eo  # noqa: F401
     c = Circuit(2)
