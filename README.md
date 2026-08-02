@@ -198,15 +198,19 @@ Tools: `run_circuit` (OpenQASM in, statevector/counts out), `circuit_stats`,
 `draw_circuit` (diagram image), `eo_transpile` (exchange-only pulse compilation),
 `blueqat_info`. All inputs are parsed without `eval` -- safe for untrusted tool calls.
 
-### Cloud access (API key groundwork)
+### Cloud access (qapi.blueqat.app)
 ```python
-import blueqat.cloud as cloud
-cloud.save_api_key("YOUR_API_KEY")   # stored in ~/.blueqat/config.json (0600)
-# or: export BLUEQAT_API_KEY=...    # environment variable takes priority
+import blueqat.cloud as cloud        # registers the 'cloud' backend
+cloud.save_api_key("YOUR_API_KEY")   # get one at https://mcp.blueqat.app/login
+# or: export BLUEQAT_API_KEY=...
 
-import blueqat.cloud                 # registers the 'cloud' backend
-# Circuit(2).h[0].cx[0, 1].m[:].run(backend='cloud', shots=100)
-# (submits the JSON-serialized circuit once the public endpoint is live)
+c = Circuit(2).h[0].cx[0, 1]
+c.m[:].run(backend='cloud', shots=100)          # counts (same conventions as local)
+c.run(backend='cloud')                          # statevector
+c.run(backend='cloud', hamiltonian=1.0 * Z[0])  # expectation value
+
+cloud.hardware_status()                          # real-QPU status (public)
+cloud.submit_hardware_job(c, shots=100, confirm=True)  # real hardware, real cost
 ```
 
 ### Blueqat to/from QASM
