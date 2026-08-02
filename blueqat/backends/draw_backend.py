@@ -105,12 +105,12 @@ class DrawCircuit(Backend):
 
                 if qlist[i][j]['type'] == 'block':
                     # 名前付きブロック: 薄紫ノードの縦連結で「箱」を表す。
-                    # 長い名前はノードから溢れるため、ノード内は短縮表示し、
-                    # 正式名は箱の最上段ノードの上にタイトルとして描く。
-                    short = gate_name if len(gate_name) <= 7 else gate_name[:6] + '…'
-                    labels[qlist[i][j]['num']] = short
+                    # ノード内に文字は入れず (溢れの原因になる)、名前は箱の
+                    # 最上段ノードの上にタイトルとして描く。サイズは通常ゲート
+                    # と同程度にして隣の列と潰れないようにする。
+                    labels[qlist[i][j]['num']] = ''
                     colors[qlist[i][j]['num']] = '#B39DDB'
-                    sizes[qlist[i][j]['num']] = 2000
+                    sizes[qlist[i][j]['num']] = 1100
                     if qlist[i][j].get('title'):
                         block_titles[qlist[i][j]['num']] = gate_name
                 # 🛠️ 制御点（黒丸）の背後に文字が重なるバグを解消するため、空文字にする
@@ -179,11 +179,20 @@ class DrawCircuit(Backend):
 
         nx.draw_networkx_labels(G, pos_attrs, labels = custom_node_attrs, font_size=8)
 
-        # ブロックの正式名を箱の最上段ノードの上にタイトルとして描く
+        # ブロックの正式名を箱の最上段ノードの上にタイトルとして描く。
+        # 同じ行 (同じ高さ) に並ぶタイトル同士が重ならないよう、行内で
+        # 左から順に高さを交互にずらす。
         if block_titles:
-            title_pos = {n: (pos[n][0], pos[n][1] + 0.55) for n in block_titles}
+            rows = {}
+            for n in block_titles:
+                rows.setdefault(round(pos[n][1], 3), []).append(n)
+            title_pos = {}
+            for row_nodes in rows.values():
+                for k, n in enumerate(sorted(row_nodes, key=lambda n: pos[n][0])):
+                    lift = 0.5 if k % 2 == 0 else 0.95
+                    title_pos[n] = (pos[n][0], pos[n][1] + lift)
             nx.draw_networkx_labels(G, title_pos, labels=block_titles,
-                                    font_size=9, font_weight='bold')
+                                    font_size=8, font_weight='bold')
 
         plt.show()
         return
