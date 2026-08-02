@@ -88,6 +88,23 @@ def test_append_block_rejects_negative_offset():
         Circuit().append_block("x", Circuit(1).x[0], offset=-1)
 
 
+def test_append_block_offset_preserves_nested_blocks():
+    # Shifting a library circuit must keep its inner block structure
+    # (previously the offset path flattened blocks away).
+    sub = Circuit(2)
+    with sub.block("stage A"):
+        sub.h[0]
+    with sub.block("stage B"):
+        sub.cx[0, 1]
+    c = Circuit()
+    c.append_block("lib", sub, offset=3)
+    lib = c.ops[0]
+    assert [op.name for op in lib.ops if isinstance(op, GateBlock)] == \
+        ["stage A", "stage B"]
+    inline = Circuit(5).h[3].cx[3, 4]
+    assert torch.allclose(c.run(), inline.run(), atol=ATOL)
+
+
 # --- execution transparency ----------------------------------------------------
 
 def test_block_execution_matches_inline_both_modes():

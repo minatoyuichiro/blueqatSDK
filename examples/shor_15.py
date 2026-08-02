@@ -1,19 +1,27 @@
-"""Shor's algorithm (order finding for N = 15, a = 2) built from named blocks.
+"""Shor's algorithm (order finding for N = 15, a = 2) as a deep nest of blocks.
 
-Shor's algorithm is naturally a nest of subroutines:
+Shor's algorithm is a hierarchy of subroutines, and this example keeps every
+level of that hierarchy in the circuit itself:
 
-    order-finding
-    ├─ superposition        (H on the counting register)
-    ├─ c-U^(2^k)            (controlled modular multiplications)
-    └─ IQFT                 (inverse QFT reads out the phase)
+    Shor order-finding (N=15, a=2)
+    ├─ init |x=1>
+    ├─ superposition (counting)
+    ├─ modular exponentiation
+    │  ├─ c-U^1 (x2 mod 15)
+    │  └─ c-U^2 (x4 mod 15)
+    └─ IQFT (counting)
+       ├─ bit reversal†
+       └─ QFT stage q_k† ...
 
-Named blocks (`with c.block(...)`) keep exactly that structure in the circuit
-object -- `print(c.tree())` shows the nesting -- while every backend still
-executes the underlying gates transparently.
+`print(c.tree())` shows the whole nest, and the drawer zooms through it:
+`expand_blocks=1` draws the four phase-estimation stages as boxes,
+`expand_blocks=2` opens modular exponentiation and the IQFT one level more,
+and `expand_blocks=True` shows every gate. Execution is untouched by any of
+this -- the assertions at the bottom check the physics end to end.
 
-Here U|x> = |2x mod 15>, which on 4 bits is just a cyclic left-shift of the
-bit register, so the controlled versions are short cswap chains. The measured
-phase s/r with r = 4 gives the factors gcd(2^(r/2) +- 1, 15) = 3 and 5.
+U|x> = |2x mod 15> is a cyclic left-shift of the 4-bit work register, so the
+controlled powers are short cswap chains; U^4 = identity, which is why the
+order r = 4 appears as phase peaks at multiples of 1/4.
 """
 import math
 from math import gcd
@@ -30,54 +38,61 @@ COUNT = list(range(N_WORK, N_WORK + N_COUNT))
 
 
 def qft_circuit(n: int) -> Circuit:
-    """QFT on qubits 0..n-1 (kept as a library circuit; placed via append_block)."""
+    """QFT on qubits 0..n-1, with each textbook stage as its own block."""
     c = Circuit(n)
     for i in reversed(range(n)):
-        c.h[i]
-        for k in range(i):
-            c.cphase(math.pi / 2 ** (i - k))[k, i]
-    for i in range(n // 2):
-        c.swap[i, n - 1 - i]
+        with c.block(f"QFT stage q{i}"):
+            c.h[i]
+            for k in range(i):
+                c.cphase(math.pi / 2 ** (i - k))[k, i]
+    with c.block("bit reversal"):
+        for i in range(n // 2):
+            c.swap[i, n - 1 - i]
     return c
 
 
 def build_order_finding() -> Circuit:
     c = Circuit(N_WORK + N_COUNT)
 
-    with c.block("order-finding(a=2, N=15)"):
+    with c.block(f"Shor order-finding (N={N}, a={A})"):
         with c.block("init |x=1>"):
             c.x[0]
 
-        with c.block("superposition"):
+        with c.block("superposition (counting)"):
             c.h[COUNT[0], COUNT[1], COUNT[2]]
 
-        # U: |x> -> |2x mod 15> is a cyclic left-shift of 4 bits.
-        # U^(2^k) shifts by 2^k; U^4 = identity, so only k = 0, 1 matter.
-        with c.block("c-U^1"):
-            ctl = COUNT[0]
-            c.cswap[ctl, 2, 3].cswap[ctl, 1, 2].cswap[ctl, 0, 1]
+        with c.block("modular exponentiation"):
+            with c.block("c-U^1 (x2 mod 15)"):
+                ctl = COUNT[0]
+                c.cswap[ctl, 2, 3].cswap[ctl, 1, 2].cswap[ctl, 0, 1]
+            with c.block("c-U^2 (x4 mod 15)"):
+                ctl = COUNT[1]
+                c.cswap[ctl, 0, 2].cswap[ctl, 1, 3]
+            # c-U^4 = identity: order 4 divides 2^2.
 
-        with c.block("c-U^2"):
-            ctl = COUNT[1]
-            c.cswap[ctl, 0, 2].cswap[ctl, 1, 3]
-
-        # IQFT on the counting register: reuse the QFT library circuit,
-        # invert it with dagger(), and place it at offset 4.
-        c.append_block("IQFT", qft_circuit(N_COUNT).dagger(), offset=N_WORK)
+        # The IQFT is the daggered QFT library circuit, placed on the
+        # counting register. dagger() mirrors the inner blocks (stage†),
+        # and append_block's offset shift preserves that structure.
+        c.append_block("IQFT (counting)", qft_circuit(N_COUNT).dagger(),
+                       offset=N_WORK)
 
     return c
 
 
 if __name__ == "__main__":
-    print("Shor's order finding for N = 15, a = 2, with named blocks")
+    print("Shor's order finding for N = 15, a = 2, with nested blocks")
     print("=" * 60)
 
     c = build_order_finding()
     print(c.tree())
     print()
 
-    # Read out the counting register's probabilities (differentiable API,
-    # but here just used for exact classical post-processing).
+    # The drawer zooms through the hierarchy (uncomment in a notebook):
+    # c.run(backend="draw")                    # 4 top-level stage boxes
+    # c.run(backend="draw", expand_blocks=1)   # same (auto-descends the wrapper)
+    # c.run(backend="draw", expand_blocks=2)   # opens modexp + IQFT stages
+    # c.run(backend="draw", expand_blocks=True)  # every gate
+
     probs = c.probs(COUNT)
     peaks = {k: p.item() for k, p in enumerate(probs) if p.item() > 1e-9}
     print("Counting-register outcomes (value: probability):")
@@ -88,7 +103,6 @@ if __name__ == "__main__":
     assert set(peaks) == {0, 2, 4, 6}, peaks
     assert all(abs(p - 0.25) < 1e-9 for p in peaks.values())
 
-    # Recover the order r from the non-trivial phase 1/4, then the factors.
     r = 4
     assert pow(A, r, N) == 1
     f1, f2 = gcd(A ** (r // 2) - 1, N), gcd(A ** (r // 2) + 1, N)

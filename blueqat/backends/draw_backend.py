@@ -96,18 +96,23 @@ class DrawCircuit(Backend):
         angles = {}
         sizes = {}
 
+        block_titles = {}
         for i in range(n_qubits):
             for j in range(len(qlist[i])):
                 angles[qlist[i][j]['num']] = qlist[i][j]['angle']
-                
+
                 gate_name = qlist[i][j]['gate']
 
                 if qlist[i][j]['type'] == 'block':
-                    # 名前付きブロック: 名前ラベル入りの大きめの薄紫ノードで
-                    # 「箱」を表す (関与する量子ビット間は縦線で結ばれる)
-                    labels[qlist[i][j]['num']] = gate_name
+                    # 名前付きブロック: 薄紫ノードの縦連結で「箱」を表す。
+                    # 長い名前はノードから溢れるため、ノード内は短縮表示し、
+                    # 正式名は箱の最上段ノードの上にタイトルとして描く。
+                    short = gate_name if len(gate_name) <= 7 else gate_name[:6] + '…'
+                    labels[qlist[i][j]['num']] = short
                     colors[qlist[i][j]['num']] = '#B39DDB'
-                    sizes[qlist[i][j]['num']] = 2200
+                    sizes[qlist[i][j]['num']] = 2000
+                    if qlist[i][j].get('title'):
+                        block_titles[qlist[i][j]['num']] = gate_name
                 # 🛠️ 制御点（黒丸）の背後に文字が重なるバグを解消するため、空文字にする
                 elif gate_name == '' or gate_name == 'CZ' or gate_name == 'CRZ':
                     labels[qlist[i][j]['num']] = ''
@@ -173,8 +178,15 @@ class DrawCircuit(Backend):
             custom_node_attrs[node] = attr
 
         nx.draw_networkx_labels(G, pos_attrs, labels = custom_node_attrs, font_size=8)
+
+        # ブロックの正式名を箱の最上段ノードの上にタイトルとして描く
+        if block_titles:
+            title_pos = {n: (pos[n][0], pos[n][1] + 0.55) for n in block_titles}
+            nx.draw_networkx_labels(G, title_pos, labels=block_titles,
+                                    font_size=9, font_weight='bold')
+
         plt.show()
-        return 
+        return
 
     def _one_qubit_gate_noargs(self, gate, ctx):
         flg = ctx[2][-1]
@@ -478,11 +490,14 @@ class DrawCircuit(Backend):
 
         time_adjust = time%30
         nums = []
-        for q in involved:
+        for k, q in enumerate(involved):
             qlist[q].append({'num': flg, 'gate': gate.name, 'angle': '',
                              'xpos': time_adjust,
                              'ypos': q * 1.5 + math.floor(time/30)*(ctx[1]+1)*1.5,
-                             'type': 'block'})
+                             'type': 'block',
+                             # 最上段 (最小の量子ビット番号 = 図では最上) のみ
+                             # 正式名タイトルを上に描く
+                             'title': k == 0})
             nums.append(flg)
             flg += 1
         for a, b in zip(nums, nums[1:]):
