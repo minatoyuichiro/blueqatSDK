@@ -494,18 +494,41 @@ class DrawCircuit(Backend):
     def run(self, gates, n_qubits, *args, **kwargs):
         """Blueqatのエントリーポイント。
 
-        名前付きブロック (GateBlock) はデフォルトでは1つの箱として描画される。
-        中身のゲートまで描画したいときは `expand_blocks=True` を渡す。"""
+        名前付きブロック (GateBlock) は箱として描画される。`expand_blocks` で
+        展開の深さを制御できる:
+
+        - False (デフォルト): ブロックを箱で表示。ただし回路全体が単一の
+          ブロックに包まれている場合は、巨大な箱1つだけの図にならないよう
+          自動でその中へ降り、子ブロックを箱として表示する。
+        - 整数 n: ブロックを n 階層ぶん展開してから、その先を箱で表示。
+        - True: すべてのブロックをゲートまで完全に展開。
+        """
         import warnings
         from ..gate import GateBlock
         expand_blocks = kwargs.get('expand_blocks', False)
+        if expand_blocks is True:
+            depth = math.inf
+        elif expand_blocks is False:
+            depth = 0
+        else:
+            depth = int(expand_blocks)
         gates, ctx = self._preprocess_run(gates, n_qubits, args, kwargs)
 
-        def _draw(ops, ctx):
+        # 回路全体が単一ブロックで、その中にさらにブロックがある場合 (Shor流の
+        # 全体包み)、既定 (depth=0) では図が箱1つになって構造が見えないため、
+        # 子ブロックが箱として現れる階層まで自動で降りる。サブブロックを持たない
+        # 単独ブロックはそのまま箱として描く。
+        ops = list(gates)
+        if expand_blocks is False:
+            while (len(ops) == 1 and isinstance(ops[0], GateBlock)
+                   and any(isinstance(o, GateBlock) for o in ops[0].ops)):
+                ops = list(ops[0].ops)
+
+        def _draw(ops, ctx, remaining):
             for gate in ops:
                 if isinstance(gate, GateBlock):
-                    if expand_blocks:
-                        ctx = _draw(gate.ops, ctx)
+                    if remaining > 0:
+                        ctx = _draw(gate.ops, ctx, remaining - 1)
                     else:
                         ctx = self._gate_block(gate, ctx)
                     continue
@@ -520,6 +543,6 @@ class DrawCircuit(Backend):
                         "backend and was omitted from the diagram.")
             return ctx
 
-        ctx = _draw(gates, ctx)
+        ctx = _draw(ops, ctx, depth)
         self._postprocess_run(ctx)
         return ctx
