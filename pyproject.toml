@@ -26,9 +26,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+mcp = [
+    "mcp>=1.2.0",        # MCPサーバ (blueqat-mcp) 用
+]
 dev = [
     "pytest>=7.0.0",     # モダンなテスト環境
+    "mcp>=1.2.0",        # MCPサーバのテスト用
 ]
+
+[project.scripts]
+blueqat-mcp = "blueqat.mcp_server:main"
 
 [project.urls]
 Homepage = "https://github.com/Blueqat/Blueqat"

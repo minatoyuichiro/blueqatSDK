@@ -39,6 +39,7 @@ blueqat ドキュメント（日本語）
    guide/autograd
    guide/exchange_only
    guide/cloud
+   guide/mcp
 
 APIリファレンス
 ---------------

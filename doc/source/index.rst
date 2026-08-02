@@ -44,6 +44,7 @@ Highlights
    guide/autograd
    guide/exchange_only
    guide/cloud
+   guide/mcp
 
 .. toctree::
    :maxdepth: 2
