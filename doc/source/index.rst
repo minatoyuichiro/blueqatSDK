@@ -42,6 +42,7 @@ Highlights
    guide/circuits
    guide/backends
    guide/autograd
+   guide/noise
    guide/exchange_only
    guide/cloud
    guide/mcp

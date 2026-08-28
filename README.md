@@ -183,6 +183,28 @@ Circuit(2).h[0].cx[0, 1].depth()        # => 2
 Circuit(2).h[0].cx[0, 1].count_ops()    # => Counter({'h': 1, 'cx': 1})
 ```
 
+### Noise and density matrices
+```python
+from blueqat.noise import depolarizing, amplitude_damping, NoiseModel
+
+# noise= switches the run onto a density-matrix simulation and applies the
+# channel after every gate. depolarizing(p) is the Nielsen & Chuang form,
+# (1-p)rho + p I/2**k, acting jointly on a two-qubit gate's qubits.
+Circuit(2).h[0].cx[0, 1].run(noise=depolarizing(0.01))              # rho
+Circuit(2).h[0].cx[0, 1].run(noise=depolarizing(0.01), shots=1000)  # counts
+Circuit(2).h[0].cx[0, 1].run(noise=depolarizing(0.01), hamiltonian=h)  # Tr(rho H)
+
+# Different rates per gate (real devices have worse two-qubit gates)
+nm = NoiseModel()
+nm.add(depolarizing(0.001))
+nm.add(depolarizing(0.01), gates=['cx'])
+
+# noise_scale= is the zero-noise-extrapolation knob: same circuit, more noise
+values = [c.run(noise=nm, noise_scale=s, hamiltonian=h) for s in (1, 2, 3)]
+```
+Density matrices have `4**n` entries, so this is for small circuits: about
+0.4 ms/gate at 8 qubits, 9 ms at 10, 183 ms at 12.
+
 ### Exchange-only spin qubits (silicon quantum dots)
 ```python
 import blueqat.eo                      # registers the 'eo' backend

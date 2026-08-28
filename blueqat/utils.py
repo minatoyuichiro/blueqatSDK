@@ -897,23 +897,27 @@ def get_measurement_sampler(n_sample: int, device: Optional[torch.device] = None
     sampling_by_measurement.set_seed = set_seed  # type: ignore[attr-defined]
     return sampling_by_measurement
 
-def pauli_expectation(hamiltonian: Any, statevector: torch.Tensor,
+def pauli_expectation(hamiltonian: Any, state: torch.Tensor,
                       n_qubits: int = -1) -> torch.Tensor:
     """``<psi|H|psi>`` for a Pauli-expression `H`, without ever building `H` as a matrix.
 
     A Pauli product is a signed permutation of basis states, so each term costs one
-    pass over the statevector. Forming the ``2**n x 2**n`` matrix first -- what
+    pass over the state. Forming the ``2**n x 2**n`` matrix first -- what
     :meth:`Expr.to_matrix` does -- instead costs ``4**n``, which puts even 16 qubits
-    out of reach. Differentiable in both the statevector and tensor-valued
-    coefficients.
+    out of reach. Differentiable in both the state and tensor-valued coefficients.
 
-    `n_qubits` defaults to the width implied by `statevector`.
+    `state` is either a statevector (1-D), giving ``<psi|H|psi>``, or a density
+    matrix (2-D), giving ``Tr(rho H)``. `n_qubits` defaults to the width implied by
+    the state.
     """
     if hasattr(hamiltonian, 'to_expr'):
         hamiltonian = hamiltonian.to_expr()
     expr = hamiltonian.simplify()
 
-    statevector = statevector.reshape(-1)
+    if state.dim() == 2:
+        return _density_pauli_expectation(expr, state, n_qubits)
+
+    statevector = state.reshape(-1)
     dim = statevector.shape[0]
     if dim & (dim - 1):
         raise ValueError(f"statevector length must be a power of two, got {dim}.")
@@ -955,6 +959,47 @@ def pauli_expectation(hamiltonian: Any, statevector: torch.Tensor,
             else:
                 out = bra
             contribution = torch.sum(out * vals * statevector)
+        total = contribution if total is None else total + contribution
+
+    if total is None:
+        return torch.zeros((), dtype=torch.float64, device=device)
+    return total.real
+
+
+def _density_pauli_expectation(expr: 'Expr', rho: torch.Tensor,
+                               n_qubits: int = -1) -> torch.Tensor:
+    """``Tr(rho H)``, the density-matrix counterpart of :func:`pauli_expectation`."""
+    dim = rho.shape[0]
+    if rho.shape[0] != rho.shape[1] or dim & (dim - 1):
+        raise ValueError(f"density matrix must be square with a power-of-two size, "
+                         f"got {tuple(rho.shape)}.")
+    implied = dim.bit_length() - 1
+    if n_qubits == -1:
+        n_qubits = implied
+    elif (1 << n_qubits) != dim:
+        raise ValueError(f"density matrix of size {dim} does not hold {n_qubits} qubits.")
+
+    max_n = expr.max_n()
+    if max_n >= n_qubits:
+        raise ValueError(f"Hamiltonian acts on qubit {max_n}, beyond the {n_qubits}-qubit state.")
+
+    device = rho.device
+    indices = torch.arange(dim, device=device)
+    total: Any = None
+    for term in expr.terms:
+        term = term.simplify()
+        if not term.ops:
+            contribution = torch.as_tensor(term.coeff, dtype=rho.dtype,
+                                           device=device) * torch.diagonal(rho).sum()
+        else:
+            # The term's only nonzero entry in column c sits in row `c ^ flip`, so
+            # Tr(rho P) = sum_r rho[r, r ^ flip] * vals[r].
+            vals = _term_to_dataarray(term, n_qubits, device).to(rho.dtype)
+            flip = 0
+            for op in term.ops:
+                if op.op in ('X', 'Y'):
+                    flip |= 1 << op.n
+            contribution = torch.sum(rho[indices, indices ^ flip] * vals)
         total = contribution if total is None else total + contribution
 
     if total is None:

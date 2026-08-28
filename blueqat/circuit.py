@@ -151,7 +151,10 @@ class Circuit:
         from blueqat.backends import BACKENDS, DEFAULT_BACKEND_NAME
         
         if backend is None:
-            backend = self.__get_backend(DEFAULT_BACKEND_NAME)
+            # Noise needs a density matrix, which the default backends do not carry;
+            # asking for noise is therefore also a choice of backend.
+            name = 'density' if kwargs.get('noise') is not None else DEFAULT_BACKEND_NAME
+            backend = self.__get_backend(name)
         elif isinstance(backend, str):
             backend = self.__get_backend(backend)
             
