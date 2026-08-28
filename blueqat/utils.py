@@ -642,7 +642,9 @@ class AnsatzBase:
         on `sampler`: an exact sampler (e.g. `non_sampling_sampler`) keeps the
         autograd graph intact, while a genuinely stochastic one (e.g. one built from
         `get_measurement_sampler`) does not -- real shot noise isn't differentiable,
-        so that is expected, not a bug.
+        so that is expected, not a bug. To optimize through such a sampler anyway,
+        `Vqe` estimates the gradient with `parameter_shift_gradient` instead, which
+        it selects on its own by default.
         """
         val: Any = 0.0
 
@@ -774,23 +776,47 @@ class VqeResult:
 class Vqe:
     def __init__(self, ansatz: AnsatzBase, optimizer_cls: Type[torch.optim.Optimizer] = torch.optim.Adam,
                  optimizer_kwargs: Optional[Dict[str, Any]] = None, sampler: Optional[Callable[[Circuit, typing.Iterable[int]], Dict[Tuple[int, ...], float]]] = None,
-                 seed: Optional[int] = None) -> None:
+                 seed: Optional[int] = None, gradient: str = 'auto') -> None:
         """`seed` (also accepted per-call as `Vqe.run(seed=...)`) makes the whole run
         deterministic: it fixes the random `initial_params` and re-seeds the sampler
         if it is a seedable one (as built by `get_measurement_sampler`). Without it,
         `run()` starts from `torch.rand` parameters, so repeated runs of the same
-        problem legitimately land in different local optima."""
+        problem legitimately land in different local optima.
+
+        `gradient` picks how the optimizer gets its gradient:
+
+        ``'auto'``
+            The default. Backpropagate when the objective carries a gradient, and
+            fall back to the parameter-shift rule when it does not -- which is
+            exactly the shot-based case, where sampling has thrown the autograd
+            graph away.
+        ``'backprop'``
+            Always backpropagate. Fails on a sampler that estimates from shots.
+        ``'parameter_shift'``
+            Always use the shift rule. Exact, and the only option that works with
+            shot noise, but it costs two extra circuit evaluations per parametric
+            gate application.
+        """
+        if gradient not in ('auto', 'backprop', 'parameter_shift'):
+            raise ValueError("gradient must be 'auto', 'backprop' or 'parameter_shift', "
+                             f"got {gradient!r}.")
         self.ansatz = ansatz
         self.optimizer_cls = optimizer_cls
         self.optimizer_kwargs = optimizer_kwargs or {"lr": 0.05}
         self.sampler = sampler
         self.sampler_call_count = 0
         self.seed = seed
+        self.gradient = gradient
 
     def run(self, max_iter: int = 500, tol: float = 1e-6, verbose: bool = False, device: Optional[torch.device] = None,
-            initial_params: Optional[torch.Tensor] = None, seed: Optional[int] = None) -> VqeResult:
+            initial_params: Optional[torch.Tensor] = None, seed: Optional[int] = None,
+            gradient: Optional[str] = None) -> VqeResult:
         if device is None: device = torch.device('cpu')
         if seed is None: seed = self.seed
+        if gradient is None: gradient = self.gradient
+        if gradient not in ('auto', 'backprop', 'parameter_shift'):
+            raise ValueError("gradient must be 'auto', 'backprop' or 'parameter_shift', "
+                             f"got {gradient!r}.")
         self.sampler_call_count = 0
         if seed is not None and hasattr(self.sampler, "set_seed"):
             # One user-facing seed drives both sources of randomness. The sampler gets
@@ -817,11 +843,29 @@ class Vqe:
                 raise ValueError(f"initial_params must have shape ({self.ansatz.n_params},), got {tuple(params.shape)}")
         optimizer = self.optimizer_cls([params], **self.optimizer_kwargs)
 
+        if counting_sampler is not None:
+            energy_of_circuit: Callable[[Circuit], Any] = \
+                lambda circuit: self.ansatz.get_energy(circuit, counting_sampler)
+        else:
+            energy_of_circuit = self.ansatz.get_energy_sparse
+
+        use_shift = gradient == 'parameter_shift'
+        if gradient == 'auto':
+            # A sampler that estimates from shots returns plain numbers, so the
+            # objective comes back with no graph to backpropagate through. That is
+            # the signal -- not a guess about which sampler was supplied.
+            probe = objective_fn(params)
+            use_shift = not (isinstance(probe, torch.Tensor) and probe.requires_grad)
+
         loss_history: List[float] = []
         for idx in range(max_iter):
             optimizer.zero_grad()
-            loss = objective_fn(params)
-            loss.backward()
+            if use_shift:
+                loss, grad = parameter_shift_gradient(self.ansatz, params, energy_of_circuit)
+                params.grad = grad.to(dtype=params.dtype, device=params.device)
+            else:
+                loss = objective_fn(params)
+                loss.backward()
             loss_history.append(float(loss.item()))
             if verbose: print(f"iter {idx}: loss={loss_history[-1]}")
             optimizer.step()
@@ -1005,6 +1049,97 @@ def _density_pauli_expectation(expr: 'Expr', rho: torch.Tensor,
     if total is None:
         return torch.zeros((), dtype=torch.float64, device=device)
     return total.real
+
+
+#: Gates whose generator has exactly two eigenvalues one apart, which is what makes
+#: the two-term shift rule exact. Controlled rotations (crx/cry/crz) have four
+#: eigenvalues and need a four-term rule, so they are refused rather than
+#: silently given a wrong gradient.
+SHIFT_RULE_GATES = frozenset({
+    'rx', 'ry', 'rz', 'p', 'phase', 'r',
+    'rxx', 'ryy', 'rzz', 'cp', 'cphase', 'cr', 'exch', 'exchange',
+})
+
+
+def parameter_shift_gradient(
+        ansatz: 'AnsatzBase', params: torch.Tensor,
+        energy_of_circuit: Callable[[Circuit], Any]) -> Tuple[torch.Tensor, torch.Tensor]:
+    """The energy and its gradient at `params`, by the parameter-shift rule.
+
+    Backpropagation cannot see through a sampler: estimating an expectation value
+    from shots throws away the autograd graph, so shot-based VQE has no gradient
+    to descend. The shift rule gets one from the same estimator, by evaluating it
+    at shifted parameters instead of differentiating it.
+
+    Each gate's own derivative is ``(E(theta + pi/2) - E(theta - pi/2)) / 2``,
+    exact rather than a finite difference. Those are then chained onto `params`
+    through autograd, so a parameter feeding several gates -- as QAOA's angles do
+    -- correctly sums their contributions.
+
+    `energy_of_circuit` takes a circuit and returns its energy; the cost is two
+    of those evaluations per parametric gate application.
+    """
+    from .circuit_funcs.flatten import flatten
+
+    tracked = params.detach().clone().requires_grad_(True)
+    # Flattening expands named blocks and sliced targets, so that a gate applied
+    # to three qubits becomes three applications: the shift rule needs a term per
+    # application, not per written operation.
+    flat = flatten(ansatz.get_circuit(tracked))
+    ops = list(flat.ops)
+    n_qubits = flat.n_qubits
+
+    trainable: List[Tuple[int, torch.Tensor]] = []
+    base_ops: List[Any] = []
+    for i, op in enumerate(ops):
+        depends = any(isinstance(v, torch.Tensor) and v.requires_grad for v in op.params)
+        if not depends:
+            base_ops.append(op)
+            continue
+        if len(op.params) != 1:
+            raise ValueError(
+                f"{op.lowername} takes {len(op.params)} parameters; the shift rule "
+                f"here handles single-parameter gates only.")
+        if op.lowername not in SHIFT_RULE_GATES:
+            raise ValueError(
+                f"{op.lowername} does not satisfy the two-term parameter-shift rule "
+                f"(its generator has more than two eigenvalues). Rebuild the ansatz "
+                f"from {sorted(SHIFT_RULE_GATES)}, or optimize by backpropagation "
+                f"with an exact sampler.")
+        trainable.append((i, op.params[0]))
+        base_ops.append(type(op).create(op.targets,
+                                        (float(op.params[0].detach()), ), None))
+
+    def energy_at(op_list: List[Any]) -> float:
+        return float(energy_of_circuit(Circuit(n_qubits, list(op_list))))
+
+    value = torch.tensor(energy_at(base_ops), dtype=torch.float64)
+    if not trainable:
+        raise ValueError(
+            "No gate parameter depends on `params`. The shift rule needs the ansatz "
+            "to pass parameters into gates as tensors; converting them to Python "
+            "floats inside get_circuit() breaks the connection.")
+
+    derivatives = []
+    for index, _ in trainable:
+        theta = float(base_ops[index].params[0])
+        shifted = []
+        for offset in (pi / 2, -pi / 2):
+            variant = list(base_ops)
+            variant[index] = type(ops[index]).create(ops[index].targets,
+                                                     (theta + offset, ), None)
+            shifted.append(energy_at(variant))
+        derivatives.append(0.5 * (shifted[0] - shifted[1]))
+
+    angles = [angle for _, angle in trainable]
+    grad_outputs = [torch.as_tensor(d, dtype=angle.dtype, device=angle.device)
+                    for d, angle in zip(derivatives, angles)]
+    grads = torch.autograd.grad(angles, tracked, grad_outputs=grad_outputs,
+                                allow_unused=True)
+    gradient = grads[0]
+    if gradient is None:
+        gradient = torch.zeros_like(tracked)
+    return value, gradient.detach().to(params.dtype)
 
 
 def sparse_expectation(mat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:

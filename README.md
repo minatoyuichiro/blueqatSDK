@@ -362,6 +362,20 @@ result = Vqe(MyAnsatz(hamiltonian, n_params=1), seed=42).run()
 print(len(result.loss_history), result.loss_history[-1])
 ```
 
+### Shot-based VQE (parameter-shift rule)
+```python
+from blueqat.utils import get_measurement_sampler
+
+# Sampling throws away the autograd graph, so a shot-based objective has no
+# gradient to backpropagate. Vqe notices and switches to the parameter-shift
+# rule, which is exact (not a finite difference) and chains correctly through
+# parameters that drive many gates, as QAOA's angles do.
+vqe = Vqe(ansatz, sampler=get_measurement_sampler(2000, seed=3), seed=42)
+result = vqe.run()
+
+# gradient='backprop' / 'parameter_shift' overrides the automatic choice.
+```
+
 ### QAOA
 ```python
 from blueqat.utils import qubo_bit as q, QaoaAnsatz, Vqe

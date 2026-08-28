@@ -89,6 +89,42 @@ be inspected without re-running under another optimizer:
    len(result.loss_history)      # iterations actually taken
    result.loss_history[-1]       # last recorded objective value
 
+Shot noise and the parameter-shift rule
+---------------------------------------
+
+Estimating an expectation value from shots throws away the autograd graph -- a
+count is a number, not a differentiable function of the gate angles -- so a
+shot-based objective has no gradient to backpropagate. ``Vqe`` notices and
+switches to the **parameter-shift rule**, which recovers the gradient from the
+same estimator by evaluating it at shifted parameters:
+
+.. code-block:: python
+
+   from blueqat.utils import get_measurement_sampler
+
+   vqe = Vqe(ansatz, sampler=get_measurement_sampler(2000, seed=3), seed=42)
+   result = vqe.run()          # works; backpropagation alone cannot
+
+Each gate contributes ``(E(theta + pi/2) - E(theta - pi/2)) / 2``, which is
+exact rather than a finite-difference approximation, and those are chained onto
+the ansatz parameters through autograd -- so a parameter driving many gates, as
+QAOA's angles do, correctly sums their contributions.
+
+``gradient=`` overrides the choice: ``'backprop'`` always differentiates
+(and fails on a shot sampler), ``'parameter_shift'`` always uses the rule, and
+the default ``'auto'`` picks by whether the objective came back differentiable.
+The rule costs two extra circuit evaluations per parametric gate application, so
+it is not a free replacement for backpropagation on the exact path.
+
+It is exact only for gates whose generator has two eigenvalues one apart:
+``rx``, ``ry``, ``rz``, ``p``/``phase``, ``rxx``, ``ryy``, ``rzz``, ``cp`` and
+``exch``. Controlled rotations (``crx``, ``cry``, ``crz``) have four and would
+need a four-term rule, so an ansatz containing them raises rather than being
+given a quietly wrong gradient.
+
+:func:`~blueqat.utils.parameter_shift_gradient` exposes the same machinery
+directly, returning the energy and gradient for any ansatz and energy estimator.
+
 QAOA
 ----
 
