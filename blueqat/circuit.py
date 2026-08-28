@@ -404,7 +404,9 @@ class Circuit:
             └─ QFT
                ├─ cphase(1.5708)[0, 1]
                └─ ...
-        """
+
+        Blocks appear by name with their contents beneath them; plain gates
+        outside any block are listed at the top level."""
         from .gate import GateBlock
 
         def _lines(ops, prefix: str):
