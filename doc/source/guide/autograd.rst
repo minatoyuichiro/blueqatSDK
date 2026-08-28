@@ -125,6 +125,27 @@ given a quietly wrong gradient.
 :func:`~blueqat.utils.parameter_shift_gradient` exposes the same machinery
 directly, returning the energy and gradient for any ansatz and energy estimator.
 
+How many shots?
+~~~~~~~~~~~~~~~
+
+Fewer than one might expect. Optimizing a 27-parameter QAOA instance (Max-Cut
+on K6, ``step=1``, 120 iterations) at 100, 1000 and 8000 shots per estimate all
+converged, reaching the optimal cut with probability 0.66 to 0.72 -- no
+degradation at the low end, so whatever threshold exists lies below 100.
+
+Wall-clock time barely moved across those three levels either, which is the
+useful thing to know: the cost of a shot-based run is dominated by *how many
+circuit evaluations the shift rule asks for* -- two per parametric gate
+application per iteration -- not by the shots inside each one. Trading shots
+away to go faster mostly does not work; reducing parameters or iterations does.
+
+Shot noise also behaves a little like the noise in stochastic gradient descent.
+In that same experiment the exact-gradient reference happened to settle into a
+poor local optimum while every shot-based run found a good one. That is one
+configuration and not a general rule -- the same problem reaches a good optimum
+from most starting points anyway -- but it is a reason not to assume a noisy
+gradient is simply a degraded one.
+
 QAOA
 ----
 
