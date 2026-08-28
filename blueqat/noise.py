@@ -91,6 +91,11 @@ class _RateChannel(Channel):
                 f"{self.name} rate must be in [0, {self.max_rate}], got {rate}.")
         self.rate = rate
 
+    def _extra_args(self) -> tuple:
+        """Constructor arguments after `rate`, so that `scaled` reproduces the
+        channel rather than dropping how it was configured."""
+        return ()
+
     def scaled(self, factor: float) -> Channel:
         scaled_rate = self.rate * float(factor)
         if not 0.0 <= scaled_rate <= self.max_rate:
@@ -98,7 +103,7 @@ class _RateChannel(Channel):
                 f"noise_scale={factor} takes {self.name}'s rate to {scaled_rate}, "
                 f"outside the valid range [0, {self.max_rate}]. Lower the rate or "
                 f"the scale rather than letting it be silently clipped.")
-        return type(self)(scaled_rate)
+        return type(self)(scaled_rate, *self._extra_args())
 
 
 class Depolarizing(_RateChannel):
@@ -109,10 +114,27 @@ class Depolarizing(_RateChannel):
     reads `p` as the probability that *some* Pauli error occurred; that one is
     :func:`pauli_depolarizing`, and the two are related by
     ``p_pauli = 3 * p / 4`` on one qubit.
+
+    After a multi-qubit gate the default is the joint ``k``-qubit channel, which
+    mixes over all ``4**k`` Pauli strings at once. With ``per_qubit=True`` the
+    single-qubit channel is instead applied to each of the gate's qubits
+    independently -- genuinely a different map, and the one meant by papers that
+    assume purely local noise. The two are equal after a one-qubit gate.
     """
 
     name = 'depolarizing'
-    scope = 'gate'
+
+    def __init__(self, rate: float, per_qubit: bool = False) -> None:
+        super().__init__(rate)
+        self.per_qubit = bool(per_qubit)
+        self.scope = 'qubit' if self.per_qubit else 'gate'
+
+    def _extra_args(self) -> tuple:
+        return (self.per_qubit,)
+
+    def __repr__(self) -> str:
+        extra = ', per_qubit=True' if self.per_qubit else ''
+        return f"depolarizing({self.rate}{extra})"
 
     def kraus(self, n_qubits: int) -> List[torch.Tensor]:
         dim4 = 4 ** n_qubits
@@ -222,9 +244,13 @@ class KrausChannel(Channel):
                          "a parameterized channel.")
 
 
-def depolarizing(p: float) -> Depolarizing:
-    """``(1 - p) rho + p I / 2**k`` -- see :class:`Depolarizing`."""
-    return Depolarizing(p)
+def depolarizing(p: float, per_qubit: bool = False) -> Depolarizing:
+    """``(1 - p) rho + p I / 2**k`` -- see :class:`Depolarizing`.
+
+    `per_qubit` switches a multi-qubit gate's noise from the joint ``k``-qubit
+    channel to the single-qubit one applied to each of its qubits independently.
+    """
+    return Depolarizing(p, per_qubit)
 
 
 def pauli_depolarizing(p: float) -> PauliDepolarizing:

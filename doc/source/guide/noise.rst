@@ -29,13 +29,26 @@ Channels
    kraus([k0, k1, ...])     # any channel, from explicit Kraus operators
 
 :func:`~blueqat.noise.depolarizing` is the Nielsen & Chuang definition: with
-probability ``p`` the state is replaced by the maximally mixed state. After a
-two-qubit gate it acts on both of that gate's qubits **jointly**, as a
-four-qubit-Pauli mixture. The other convention in circulation reads ``p`` as
-the probability that some Pauli error occurred; that is
-:func:`~blueqat.noise.pauli_depolarizing`, a single-qubit channel, and the two
-agree when ``p_pauli = 3 * p / 4``. Getting this wrong shifts every number, so
-the two are kept as separate names rather than as one argument.
+probability ``p`` the state is replaced by the maximally mixed state. The other
+convention in circulation reads ``p`` as the probability that some Pauli error
+occurred; that is :func:`~blueqat.noise.pauli_depolarizing`, and the two agree
+when ``p_pauli = 3 * p / 4``. Getting this wrong shifts every number, so the two
+are kept as separate names rather than as one argument.
+
+After a two-qubit gate, depolarizing acts on both of that gate's qubits
+**jointly** by default -- a mixture over all ``4**k`` Pauli strings. With
+``per_qubit=True`` the single-qubit channel is applied to each of the gate's
+qubits independently instead:
+
+.. code-block:: python
+
+   depolarizing(0.02)                   # joint two-qubit channel after a cx
+   depolarizing(0.02, per_qubit=True)   # one-qubit channel on each of its qubits
+
+These are genuinely different maps and both are wanted: the joint one is the
+k-qubit channel as usually written, while a paper assuming purely *local* noise
+means the independent one. At the same rate the local form damps a bit harder,
+because two channels touch the state where one did.
 
 Damping channels are single-qubit and are applied to each qubit a gate touched.
 Measurement, reset and barrier never carry noise.

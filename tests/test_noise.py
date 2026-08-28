@@ -170,14 +170,45 @@ def test_noisy_run_matches_the_brute_force_reference(noise):
     assert torch.allclose(got, want, atol=1e-10)
 
 
-def test_two_qubit_depolarizing_acts_jointly_not_per_qubit():
+def test_two_qubit_depolarizing_acts_jointly_by_default():
     # A k-qubit depolarizing channel after a 2-qubit gate is not the same map as
-    # the 1-qubit channel applied to each of its qubits; the joint one is what the
-    # Nielsen & Chuang definition and the reproduction targets mean.
+    # the 1-qubit channel applied to each of its qubits.
     c = Circuit(2).h[0].cx[0, 1]
-    joint = c.run(noise=depolarizing(0.2))
-    per_qubit = c.run(noise=pauli_depolarizing(0.2))
-    assert not torch.allclose(joint, per_qubit, atol=1e-6)
+    assert not torch.allclose(c.run(noise=depolarizing(0.2)),
+                              c.run(noise=depolarizing(0.2, per_qubit=True)), atol=1e-6)
+
+
+def test_per_qubit_depolarizing_matches_the_reference():
+    # per_qubit=True is what papers assuming purely local noise mean.
+    c = Circuit(3).h[0].cx[0, 1].cz[1, 2].rx(0.3)[2]
+    noise = depolarizing(0.05, per_qubit=True)
+    assert torch.allclose(c.run(noise=noise), _reference(c, 3, as_noise_model(noise)),
+                          atol=1e-10)
+
+
+def test_per_qubit_and_joint_agree_after_one_qubit_gates():
+    c = Circuit(2).h[0].t[1].rx(0.4)[0]
+    assert torch.allclose(c.run(noise=depolarizing(0.1)),
+                          c.run(noise=depolarizing(0.1, per_qubit=True)), atol=1e-12)
+
+
+def test_per_qubit_survives_noise_scale():
+    channel = depolarizing(0.01, per_qubit=True)
+    scaled = channel.scaled(3.0)
+    assert scaled.per_qubit and scaled.rate == pytest.approx(0.03)
+    c = Circuit(2).h[0].cx[0, 1]
+    assert torch.allclose(c.run(noise=channel, noise_scale=3.0),
+                          c.run(noise=depolarizing(0.03, per_qubit=True)), atol=1e-12)
+
+
+def test_per_qubit_depolarizing_damps_more_than_joint():
+    # Two independent single-qubit channels touch more of the state than one
+    # joint two-qubit channel at the same rate.
+    c = Circuit(2).h[0].cx[0, 1]
+    h = 1.0 * Z[0] * Z[1]
+    joint = abs(float(c.run(noise=depolarizing(0.05), hamiltonian=h)))
+    local = abs(float(c.run(noise=depolarizing(0.05, per_qubit=True), hamiltonian=h)))
+    assert local < joint
 
 
 def test_trace_is_preserved_under_noise():

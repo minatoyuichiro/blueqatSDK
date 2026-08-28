@@ -189,7 +189,9 @@ from blueqat.noise import depolarizing, amplitude_damping, NoiseModel
 
 # noise= switches the run onto a density-matrix simulation and applies the
 # channel after every gate. depolarizing(p) is the Nielsen & Chuang form,
-# (1-p)rho + p I/2**k, acting jointly on a two-qubit gate's qubits.
+# (1-p)rho + p I/2**k, acting jointly on a two-qubit gate's qubits;
+# depolarizing(p, per_qubit=True) instead applies the one-qubit channel to each
+# of them (what papers assuming purely local noise mean -- a different map).
 Circuit(2).h[0].cx[0, 1].run(noise=depolarizing(0.01))              # rho
 Circuit(2).h[0].cx[0, 1].run(noise=depolarizing(0.01), shots=1000)  # counts
 Circuit(2).h[0].cx[0, 1].run(noise=depolarizing(0.01), hamiltonian=h)  # Tr(rho H)
