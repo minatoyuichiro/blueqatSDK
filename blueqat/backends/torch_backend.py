@@ -644,12 +644,10 @@ class TorchBackend(Backend):
                 flattened_state = flattened_state[reversed_indices]
 
             if hamiltonian is not None:
-                h_mat = hamiltonian.to_matrix(n_qubits, device=device).to(target_dtype)
-                if h_mat.is_sparse:
-                    hv = torch.sparse.mm(h_mat, flattened_state.unsqueeze(1)).squeeze(1)
-                else:
-                    hv = h_mat @ flattened_state
-                return torch.vdot(flattened_state, hv).real
+                # Term-by-term on the statevector: O(terms * 2**n) rather than the
+                # 4**n it costs to build the Hamiltonian as a matrix first.
+                from ..utils import pauli_expectation
+                return pauli_expectation(hamiltonian, flattened_state, n_qubits)
 
             if returns == "statevector" or shots is None:
                 return flattened_state

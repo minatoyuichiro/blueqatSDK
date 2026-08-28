@@ -897,6 +897,71 @@ def get_measurement_sampler(n_sample: int, device: Optional[torch.device] = None
     sampling_by_measurement.set_seed = set_seed  # type: ignore[attr-defined]
     return sampling_by_measurement
 
+def pauli_expectation(hamiltonian: Any, statevector: torch.Tensor,
+                      n_qubits: int = -1) -> torch.Tensor:
+    """``<psi|H|psi>`` for a Pauli-expression `H`, without ever building `H` as a matrix.
+
+    A Pauli product is a signed permutation of basis states, so each term costs one
+    pass over the statevector. Forming the ``2**n x 2**n`` matrix first -- what
+    :meth:`Expr.to_matrix` does -- instead costs ``4**n``, which puts even 16 qubits
+    out of reach. Differentiable in both the statevector and tensor-valued
+    coefficients.
+
+    `n_qubits` defaults to the width implied by `statevector`.
+    """
+    if hasattr(hamiltonian, 'to_expr'):
+        hamiltonian = hamiltonian.to_expr()
+    expr = hamiltonian.simplify()
+
+    statevector = statevector.reshape(-1)
+    dim = statevector.shape[0]
+    if dim & (dim - 1):
+        raise ValueError(f"statevector length must be a power of two, got {dim}.")
+    implied = dim.bit_length() - 1
+    if n_qubits == -1:
+        n_qubits = implied
+    elif (1 << n_qubits) != dim:
+        raise ValueError(f"statevector of length {dim} does not hold {n_qubits} qubits.")
+
+    max_n = expr.max_n()
+    if max_n >= n_qubits:
+        raise ValueError(f"Hamiltonian acts on qubit {max_n}, beyond the {n_qubits}-qubit state.")
+
+    device = statevector.device
+    bra = statevector.conj()
+    indices: Optional[torch.Tensor] = None
+    total: Any = None
+
+    for term in expr.terms:
+        term = term.simplify()
+        if not term.ops:
+            # Identity term: coeff * <psi|psi> (matching what the matrix form would
+            # give for an unnormalized state).
+            contribution = torch.as_tensor(term.coeff, dtype=statevector.dtype,
+                                           device=device) * torch.sum(bra * statevector)
+        else:
+            # `vals[c]` is the term's only nonzero entry in column c (coefficient
+            # included), sitting in row `c ^ flip`; so the sum below is exactly
+            # sum_c conj(psi[c ^ flip]) * vals[c] * psi[c].
+            vals = _term_to_dataarray(term, n_qubits, device).to(statevector.dtype)
+            flip = 0
+            for op in term.ops:
+                if op.op in ('X', 'Y'):
+                    flip |= 1 << op.n
+            if flip:
+                if indices is None:
+                    indices = torch.arange(dim, device=device)
+                out = bra[indices ^ flip]
+            else:
+                out = bra
+            contribution = torch.sum(out * vals * statevector)
+        total = contribution if total is None else total + contribution
+
+    if total is None:
+        return torch.zeros((), dtype=torch.float64, device=device)
+    return total.real
+
+
 def sparse_expectation(mat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
     mv = torch.sparse.mm(mat, vec.unsqueeze(1)).squeeze(1) if mat.is_sparse else torch.mv(mat, vec)
     return torch.vdot(vec, mv).real

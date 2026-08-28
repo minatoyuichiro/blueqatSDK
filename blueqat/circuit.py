@@ -285,6 +285,54 @@ class Circuit:
             hamiltonian = hamiltonian.to_expr().simplify()
         return self.run(backend, hamiltonian=hamiltonian, **kwargs)
 
+    def exp_pauli(self, paulis: typing.Mapping[int, str], theta: Any) -> 'Circuit':
+        """Append ``exp(-i * theta * P)``, the time evolution of a single Pauli product.
+
+        `paulis` maps a qubit index to its Pauli letter, so the operator is stated
+        without reference to any bit order or overall width::
+
+            Circuit().exp_pauli({0: 'X', 1: 'X', 2: 'Z', 3: 'Y'}, 0.3)  # exp(-0.3i XXZY)
+
+        Since ``P**2 == I``, this is exactly ``cos(theta) - i sin(theta) P``. The
+        convention (no factor of 1/2) matches
+        :meth:`~blueqat.utils.Term.get_time_evolution`; note that a single-qubit
+        ``{q: 'Z'}`` is therefore ``rz(2 * theta)[q]``.
+
+        `theta` may be a ``torch.Tensor``, in which case the gradient flows through.
+        Letters are case-insensitive, and ``'I'`` entries are ignored. A product of
+        nothing but identities is a global phase, which a statevector does not carry,
+        so it appends no gates.
+        """
+        ops = []
+        for qubit, letter in paulis.items():
+            if not isinstance(qubit, int) or isinstance(qubit, bool) or qubit < 0:
+                raise ValueError(f"Qubit index must be a non-negative int, got {qubit!r}.")
+            letter = str(letter).upper()
+            if letter not in ('X', 'Y', 'Z', 'I'):
+                raise ValueError(f"Pauli letter must be one of X, Y, Z, I, got {letter!r}.")
+            if letter != 'I':
+                ops.append((qubit, letter))
+        if not ops:
+            return self
+        ops.sort()
+
+        half_pi = torch.pi / 2
+        # Rotate each factor into the Z basis (H X H = Z, RX(+pi/2) Y RX(-pi/2) = Z),
+        # accumulate the parity of the whole product onto the last qubit, rotate it by
+        # rz(2*theta), then undo both. Same construction as Term.get_time_evolution.
+        for qubit, letter in ops:
+            if letter == 'X': self.h[qubit]
+            elif letter == 'Y': self.rx(half_pi)[qubit]
+        for i in range(1, len(ops)):
+            self.cx[ops[i - 1][0], ops[i][0]]
+        self.rz(2 * theta)[ops[-1][0]]
+        for i in range(len(ops) - 1, 0, -1):
+            self.cx[ops[i - 1][0], ops[i][0]]
+        for qubit, letter in ops:
+            if letter == 'X': self.h[qubit]
+            elif letter == 'Y': self.rx(-half_pi)[qubit]
+        return self
+
     def block(self, name: str) -> '_BlockContext':
         """Group the operations appended inside the `with` body into a named,
         nestable block (as in the sub-circuits of Shor's algorithm)::

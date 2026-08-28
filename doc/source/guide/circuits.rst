@@ -66,6 +66,33 @@ selected qubits) and Hamiltonian expectation values:
    Circuit(2).h[0].cx[0, 1].probs([1])       # marginal of qubit 1
    Circuit(1).rx(0.4)[0].expect(1.0 * Z[0])  # <Z> = cos(0.4)
 
+Any Pauli expression works as the observable, including sums:
+``c.expect(1.0 * Z[0] * Z[1] - 0.5 * X[2])``, equivalently
+``c.run(hamiltonian=...)``. The value is computed term by term over the
+statevector rather than by building the Hamiltonian as a ``2**n x 2**n``
+matrix, so it costs ``O(terms * 2**n)`` and stays usable well past the
+~13 qubits at which the matrix form becomes impractical.
+
+Pauli exponentials
+------------------
+
+:meth:`~blueqat.circuit.Circuit.exp_pauli` appends ``exp(-i * theta * P)``
+for a Pauli product ``P``, the building block of Trotter steps and of most
+chemistry and QAOA ansatz circuits. The operator is given as a mapping from
+qubit index to Pauli letter, so it carries no bit-order ambiguity and sparse
+products stay short:
+
+.. code-block:: python
+
+   Circuit().exp_pauli({0: 'X', 1: 'X', 2: 'Z', 3: 'Y'}, 0.3)  # exp(-0.3i XXZY)
+   Circuit().exp_pauli({5: 'Z'}, t)                            # == rz(2t)[5]
+
+Because ``P**2 == I``, this is exactly ``cos(theta) - i sin(theta) P``. The
+convention (no factor of 1/2) is the same as
+:meth:`~blueqat.utils.Term.get_time_evolution`, which builds the same
+sequence from a ``Term``. ``theta`` may be a ``torch.Tensor``, so the
+parameter stays differentiable; ``'I'`` entries are ignored.
+
 Inverse circuits
 ----------------
 

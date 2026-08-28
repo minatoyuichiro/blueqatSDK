@@ -143,6 +143,20 @@ Circuit(4).x[:].run(hamiltonian=hamiltonian)
 Circuit(4).x[:].expect(hamiltonian)
 ```
 
+### Pauli exponentials and expectation values
+```python
+from blueqat.utils import X, Y, Z
+
+# exp(-i * theta * P) for a Pauli product P, given as {qubit: letter} so there
+# is no bit-order ambiguity. P**2 == I, so this is exactly cos(t) - i sin(t) P.
+Circuit().exp_pauli({0: 'X', 1: 'X', 2: 'Z', 3: 'Y'}, 0.3)   # exp(-0.3i XXZY)
+Circuit().exp_pauli({5: 'Z'}, 0.3)                           # == rz(0.6)[5]
+
+# Expectation of any Pauli expression, computed term-by-term over the
+# statevector (O(terms * 2**n)) instead of building a 2**n x 2**n matrix.
+Circuit(18).h[:].expect(1.0 * Z[0] * Z[1] - 0.5 * X[2])
+```
+
 ### Named gate blocks (nested subcircuits)
 ```python
 c = Circuit(7)
