@@ -133,6 +133,28 @@ def test_cloud_counts_roundtrip_and_bit_order():
     assert call["payload"]["gates"][0] == {"gate": "h", "qubits": [0]}
 
 
+def test_cloud_counts_honor_bit_order_argument():
+    t = FakeTransport({"counts": {"10": 60, "00": 40}, "shots": 100,
+                       "bit_order": "bitstring[0] is qubit 0"})
+    cloud.configure(api_key="k", transport=t)
+    # 'q0_first' asks for the API's own layout, so keys pass through unflipped.
+    counts = Circuit(2).h[0].m[:].run(backend="cloud", shots=100, bit_order="q0_first")
+    assert counts == {"10": 60, "00": 40}
+
+    with pytest.raises(ValueError):
+        Circuit(2).h[0].m[:].run(backend="cloud", shots=100, bit_order="little")
+
+
+def test_cloud_counts_are_zero_padded_to_n_qubits():
+    # A short key from the API ('1' meaning qubit 0) must not be reversed into a
+    # differently-meaning short key; padding to n comes first.
+    t = FakeTransport({"counts": {"1": 70, "0": 30}, "shots": 100,
+                       "bit_order": "bitstring[0] is qubit 0"})
+    cloud.configure(api_key="k", transport=t)
+    counts = Circuit(4).x[0].m[:].run(backend="cloud", shots=100)
+    assert counts == {"0001": 70, "0000": 30}
+
+
 def test_cloud_statevector():
     t = FakeTransport({"statevector": [{"re": 1.0, "im": 0.0},
                                        {"re": 0.0, "im": 0.0}]})

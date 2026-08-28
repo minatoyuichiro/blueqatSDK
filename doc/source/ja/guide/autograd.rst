@@ -61,6 +61,32 @@ VQE
 サンプラ（ショットベース推定の ``get_measurement_sampler(n)`` 、厳密で
 勾配を保つ ``non_sampling_sampler`` ）、 ``initial_params`` を受け取れます。
 
+実行の再現と収束の確認
+----------------------
+
+``initial_params`` を渡さない場合、 ``Vqe.run()`` はランダムなパラメータから
+始まるため、同じ問題でも実行ごとに異なる局所最適解に落ちます。QAOAでは
+「最適解が見つかる確率」が実行ごとに大きく変わることもあります。 ``seed=``
+を渡すと実行全体が決定的になります:
+
+.. code-block:: python
+
+   Vqe(ansatz, seed=42).run()          # または: Vqe(ansatz).run(seed=42)
+
+1つのシードが両方の乱数を決めます。初期パラメータと、
+``get_measurement_sampler(n, seed=...)`` で作ったシード対応サンプラの
+サンプリングです。 ``Circuit.run(seed=...)`` と同じく専用の generator を
+使うので、グローバルな乱数には影響しません。
+
+各実行は反復ごとの目的関数値を記録するので、別のオプティマイザで回し直さ
+なくても収束の様子を確認できます:
+
+.. code-block:: python
+
+   result = Vqe(ansatz, seed=42).run()
+   len(result.loss_history)      # 実際に回った反復数
+   result.loss_history[-1]       # 最後に記録された目的関数値
+
 QAOA
 ----
 

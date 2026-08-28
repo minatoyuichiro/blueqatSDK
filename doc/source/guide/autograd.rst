@@ -63,6 +63,32 @@ VQE
 ``non_sampling_sampler`` for exact, gradient-preserving expectation), and
 ``initial_params``.
 
+Reproducible runs and convergence
+---------------------------------
+
+Without ``initial_params``, ``Vqe.run()`` starts from random parameters, so
+repeated runs of the same problem land in different local optima -- for a
+QAOA instance that can mean a wildly different probability of finding the
+optimum from one run to the next. ``seed=`` pins the whole run down:
+
+.. code-block:: python
+
+   Vqe(ansatz, seed=42).run()          # or: Vqe(ansatz).run(seed=42)
+
+One seed covers both sources of randomness: the initial parameters, and the
+sampler's draws when it is a seedable one built by
+``get_measurement_sampler(n, seed=...)``. Like ``Circuit.run(seed=...)`` it
+uses a private generator, leaving the global RNG alone.
+
+Every run records its objective value at each iteration, so convergence can
+be inspected without re-running under another optimizer:
+
+.. code-block:: python
+
+   result = Vqe(ansatz, seed=42).run()
+   len(result.loss_history)      # iterations actually taken
+   result.loss_history[-1]       # last recorded objective value
+
 QAOA
 ----
 

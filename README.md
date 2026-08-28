@@ -91,6 +91,20 @@ Circuit(50).h[:].run(shots=3)
 Circuit(50).h[:].run(returns="amplitude", amplitude="0" * 50)
 ```
 
+### Reproducible sampling and counts bit order
+```python
+# seed= fixes every random draw of a run (shot sampling, mid-circuit collapse,
+# large-n perfect sampling). It drives a private torch.Generator, so it does not
+# disturb the global RNG your program uses.
+c = Circuit(4).h[:]
+c.run(shots=200, seed=42) == c.run(shots=200, seed=42)   # True
+
+# Counts keys are q_{n-1}...q_0 by default (qubit 0 rightmost). Cloud APIs use
+# the opposite order; bit_order= converts, always zero-padded to n_qubits.
+Circuit(3).x[0].run(shots=4)                        # => Counter({'001': 4})
+Circuit(3).x[0].run(shots=4, bit_order='q0_first')  # => Counter({'100': 4})
+```
+
 ### Single Amplitude
 ```python
 Circuit(4).h[:].run(amplitude="0101")
@@ -282,6 +296,13 @@ vqe = Vqe(MyAnsatz(hamiltonian, n_params=1))
 result = vqe.run(initial_params=torch.tensor([0.1]))  # initial_params is optional
 print(result.params, result.circuit.run())
 print(vqe.sampler_call_count)  # 0 unless a sampler was supplied to Vqe(...)
+
+# Without initial_params the run starts from random parameters, so repeated runs
+# reach different local optima. seed= makes the whole run deterministic (initial
+# parameters and, for a seedable sampler, its draws), and loss_history records
+# the objective at every iteration for convergence checks.
+result = Vqe(MyAnsatz(hamiltonian, n_params=1), seed=42).run()
+print(len(result.loss_history), result.loss_history[-1])
 ```
 
 ### QAOA

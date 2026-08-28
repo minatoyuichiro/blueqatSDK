@@ -49,6 +49,41 @@ the full vector:
 
 Sampling uses inverse-CDF search, so there is no category-count limit.
 
+Reproducible sampling
+---------------------
+
+``seed=`` fixes every random draw a run makes -- shot sampling, mid-circuit
+collapse and large-``n`` perfect sampling alike -- so the same circuit and
+seed always give the same counts:
+
+.. code-block:: python
+
+   c = Circuit(4).h[:]
+   c.run(shots=200, seed=42) == c.run(shots=200, seed=42)   # True
+
+The seed drives a private ``torch.Generator``, not ``torch.manual_seed``, so
+seeding a circuit does not disturb the RNG the rest of your program uses.
+Without ``seed=``, runs stay random exactly as before.
+
+Counts bit order
+----------------
+
+By default the leftmost character of a counts key is the highest-numbered
+qubit, so ``key[-1]`` is qubit 0. Cloud APIs (including
+``qapi.blueqat.app``) use the opposite layout; ``bit_order='q0_first'``
+returns keys in that order instead of leaving each caller to reverse them by
+hand:
+
+.. code-block:: python
+
+   Circuit(3).x[0].run(shots=4)                          # Counter({'001': 4})
+   Circuit(3).x[0].run(shots=4, bit_order='q0_first')    # Counter({'100': 4})
+
+Keys are always zero-padded to exactly ``n_qubits`` characters, in both
+orders -- an unpadded ``'11'`` would be ambiguous between qubits 0 and 1 and
+qubits 4 and 5 once reversed. :func:`~blueqat.backends.backendbase.apply_bit_order`
+applies the same conversion to a ``Counter`` obtained elsewhere.
+
 Mid-circuit measurement and reset
 ---------------------------------
 

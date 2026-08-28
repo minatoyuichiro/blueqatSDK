@@ -47,7 +47,7 @@ from collections import Counter as _Counter
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .backends.backendbase import Backend, register_backend
+from .backends.backendbase import Backend, apply_bit_order, register_backend
 from .gate import Operation
 
 DEFAULT_ENDPOINT = "https://qapi.blueqat.app/v1"
@@ -288,8 +288,13 @@ class CloudBackend(Backend):
             payload["output"] = "counts"
             payload["shots"] = int(shots)
             result = _request("POST", "/circuits/run", payload)
-            # API counts are q0-first; convert back to SDK order.
-            return _Counter({k[::-1]: v for k, v in result["counts"].items()})
+            # API counts are q0-first, so reversing puts them in SDK order; only then
+            # can they be zero-padded (padding a q0-first key on the left would move
+            # its qubits). `apply_bit_order` does the padding and, if the caller asked
+            # for `bit_order="q0_first"`, flips the padded key back.
+            bit_order = kwargs.get("bit_order", "q0_last")
+            sdk_order = _Counter({k[::-1]: v for k, v in result["counts"].items()})
+            return apply_bit_order(sdk_order, n, bit_order)
 
         payload["output"] = "statevector"
         result = _request("POST", "/circuits/run", payload)

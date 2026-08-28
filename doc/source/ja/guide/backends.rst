@@ -49,6 +49,40 @@
 
 サンプリングは逆CDF探索を使っており、カテゴリ数の上限はありません。
 
+再現可能なサンプリング
+----------------------
+
+``seed=`` は実行中のすべての乱数（ショットサンプリング、回路途中の
+collapse、大規模 ``n`` のperfect sampling）を固定します。同じ回路・同じ
+シードなら常に同じcountsになります:
+
+.. code-block:: python
+
+   c = Circuit(4).h[:]
+   c.run(shots=200, seed=42) == c.run(shots=200, seed=42)   # True
+
+シードは ``torch.manual_seed`` ではなく専用の ``torch.Generator`` を駆動する
+ため、回路にシードを与えてもプログラムの他の部分が使う乱数には影響しません。
+``seed=`` を渡さなければ、従来通りランダムなままです。
+
+countsのビット順
+----------------
+
+既定ではcountsのキーの左端が最大番号の量子ビットで、 ``key[-1]`` が量子
+ビット0です。クラウドAPI（ ``qapi.blueqat.app`` を含む）は逆の並びを使う
+ため、 ``bit_order='q0_first'`` を指定すると各自で反転させる代わりにその
+並びで受け取れます:
+
+.. code-block:: python
+
+   Circuit(3).x[0].run(shots=4)                          # Counter({'001': 4})
+   Circuit(3).x[0].run(shots=4, bit_order='q0_first')    # Counter({'100': 4})
+
+キーはどちらの並びでも必ず ``n_qubits`` 桁にゼロ埋めされます。ゼロ埋めが
+ないと、反転した ``'11'`` が量子ビット0,1なのか4,5なのか区別できないから
+です。他所で得た ``Counter`` には
+:func:`~blueqat.backends.backendbase.apply_bit_order` で同じ変換をかけられます。
+
 中間測定とリセット
 ------------------
 

@@ -19,7 +19,7 @@ import cmath
 import math
 import re
 from collections import Counter, defaultdict, namedtuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import reduce
 from itertools import combinations, product
 from math import pi
@@ -744,6 +744,11 @@ class VqeResult:
     vqe: Optional['Vqe'] = None
     params: Optional[torch.Tensor] = None
     circuit: Optional[Circuit] = None
+    #: Objective value at every optimizer iteration, in order, so that a run can
+    #: be checked for convergence without re-running it with another optimizer.
+    #: `len(loss_history)` is the number of iterations actually taken (which is
+    #: below `max_iter` when the gradient-norm tolerance stopped the loop early).
+    loss_history: List[float] = field(default_factory=list)
     _probs: Optional[Dict[Tuple[int, ...], float]] = None
 
     def most_common(self, n: int = 1) -> Tuple[Tuple[Tuple[int, ...], float], ...]:
@@ -768,17 +773,30 @@ class VqeResult:
 
 class Vqe:
     def __init__(self, ansatz: AnsatzBase, optimizer_cls: Type[torch.optim.Optimizer] = torch.optim.Adam,
-                 optimizer_kwargs: Optional[Dict[str, Any]] = None, sampler: Optional[Callable[[Circuit, typing.Iterable[int]], Dict[Tuple[int, ...], float]]] = None) -> None:
+                 optimizer_kwargs: Optional[Dict[str, Any]] = None, sampler: Optional[Callable[[Circuit, typing.Iterable[int]], Dict[Tuple[int, ...], float]]] = None,
+                 seed: Optional[int] = None) -> None:
+        """`seed` (also accepted per-call as `Vqe.run(seed=...)`) makes the whole run
+        deterministic: it fixes the random `initial_params` and re-seeds the sampler
+        if it is a seedable one (as built by `get_measurement_sampler`). Without it,
+        `run()` starts from `torch.rand` parameters, so repeated runs of the same
+        problem legitimately land in different local optima."""
         self.ansatz = ansatz
         self.optimizer_cls = optimizer_cls
         self.optimizer_kwargs = optimizer_kwargs or {"lr": 0.05}
         self.sampler = sampler
         self.sampler_call_count = 0
+        self.seed = seed
 
     def run(self, max_iter: int = 500, tol: float = 1e-6, verbose: bool = False, device: Optional[torch.device] = None,
-            initial_params: Optional[torch.Tensor] = None) -> VqeResult:
+            initial_params: Optional[torch.Tensor] = None, seed: Optional[int] = None) -> VqeResult:
         if device is None: device = torch.device('cpu')
+        if seed is None: seed = self.seed
         self.sampler_call_count = 0
+        if seed is not None and hasattr(self.sampler, "set_seed"):
+            # One user-facing seed drives both sources of randomness. The sampler gets
+            # a derived (not identical) seed so that its draws are not correlated with
+            # the initial-parameter draws.
+            self.sampler.set_seed(int(seed) + 0x9E3779B9)
         counting_sampler = None
         if self.sampler is not None:
             def counting_sampler(circuit: Circuit, meas: typing.Iterable[int]) -> Dict[Tuple[int, ...], float]:
@@ -787,22 +805,31 @@ class Vqe:
         objective_fn = self.ansatz.get_objective(counting_sampler, device=device)
 
         if initial_params is None:
-            params = torch.rand(self.ansatz.n_params, dtype=torch.float64, device=device, requires_grad=True)
+            generator = None
+            if seed is not None:
+                generator = torch.Generator(device=device)
+                generator.manual_seed(int(seed))
+            params = torch.rand(self.ansatz.n_params, dtype=torch.float64, device=device,
+                                generator=generator).requires_grad_(True)
         else:
             params = torch.as_tensor(initial_params, dtype=torch.float64, device=device).clone().detach().requires_grad_(True)
             if params.shape != (self.ansatz.n_params,):
                 raise ValueError(f"initial_params must have shape ({self.ansatz.n_params},), got {tuple(params.shape)}")
         optimizer = self.optimizer_cls([params], **self.optimizer_kwargs)
-        
+
+        loss_history: List[float] = []
         for idx in range(max_iter):
             optimizer.zero_grad()
             loss = objective_fn(params)
             loss.backward()
+            loss_history.append(float(loss.item()))
+            if verbose: print(f"iter {idx}: loss={loss_history[-1]}")
             optimizer.step()
             if params.grad is not None and torch.norm(params.grad) < tol: break
                 
         final_params = params.detach()
-        self._result = VqeResult(self, final_params, self.ansatz.get_circuit(final_params))
+        self._result = VqeResult(self, final_params, self.ansatz.get_circuit(final_params),
+                                 loss_history=loss_history)
         return self._result
 
 
@@ -827,7 +854,26 @@ def expect(qubits: torch.Tensor, meas: typing.Iterable[int]) -> Dict[Tuple[int, 
 def non_sampling_sampler(circuit: Circuit, meas: typing.Iterable[int]) -> Dict[Tuple[int, ...], float]:
     return expect(circuit.run(), meas)
 
-def get_measurement_sampler(n_sample: int, device: Optional[torch.device] = None) -> Callable[[Circuit, typing.Iterable[int]], Dict[Tuple[int, ...], float]]:
+def get_measurement_sampler(n_sample: int, device: Optional[torch.device] = None,
+                            seed: Optional[int] = None) -> Callable[[Circuit, typing.Iterable[int]], Dict[Tuple[int, ...], float]]:
+    """A sampler that estimates probabilities from `n_sample` simulated measurements.
+
+    With `seed` set, the sampler draws from its own generator instead of the global
+    RNG, so a VQE run using it is reproducible. The returned callable also carries a
+    `set_seed(seed)` method, which is what `Vqe.run(seed=...)` calls to put the whole
+    run -- initial parameters and sampling alike -- under a single seed."""
+    state: Dict[str, Optional[torch.Generator]] = {"generator": None}
+
+    def set_seed(new_seed: Optional[int]) -> None:
+        if new_seed is None:
+            state["generator"] = None
+            return
+        generator = torch.Generator(device=device or torch.device('cpu'))
+        generator.manual_seed(int(new_seed))
+        state["generator"] = generator
+
+    set_seed(seed)
+
     def sampling_by_measurement(circuit: Circuit, meas: typing.Iterable[int]) -> Dict[Tuple[int, ...], float]:
         meas_tuple = tuple(meas)
         statevector = circuit.run()
@@ -837,7 +883,8 @@ def get_measurement_sampler(n_sample: int, device: Optional[torch.device] = None
         # (cumsum + searchsorted) has no such limit. Same approach as TorchBackend.
         cdf = torch.cumsum(probs, dim=0)
         cdf[-1] = 1.0
-        u = torch.rand(n_sample, device=probs.device, dtype=probs.dtype)
+        u = torch.rand(n_sample, device=probs.device, dtype=probs.dtype,
+                       generator=state["generator"])
         samples = torch.searchsorted(cdf, u)
         unique_elements, counts = torch.unique(samples, return_counts=True)
         
@@ -846,6 +893,8 @@ def get_measurement_sampler(n_sample: int, device: Optional[torch.device] = None
             bit_key = tuple((idx.item() >> m) & 1 for m in meas_tuple)
             result_counts[bit_key] += count.item()
         return {k: v / n_sample for k, v in result_counts.items()}
+
+    sampling_by_measurement.set_seed = set_seed  # type: ignore[attr-defined]
     return sampling_by_measurement
 
 def sparse_expectation(mat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:

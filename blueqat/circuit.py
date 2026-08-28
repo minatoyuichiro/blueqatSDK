@@ -131,7 +131,23 @@ class Circuit:
         return copied
 
     def run(self, backend: Optional[str] = None, *args, **kwargs) -> Any:
-        """Run the circuit. Passes parameters to the PyTorch-based backend."""
+        """Run the circuit. Passes parameters to the PyTorch-based backend.
+
+        Beyond the backend's own arguments (``shots``, ``returns``, ``mode``,
+        ``hamiltonian``, ``amplitude``, ``initial``, ...), two arguments shape
+        sampled results:
+
+        ``seed``
+            Fix every random draw of this run -- shot sampling, mid-circuit
+            collapse and large-``n`` perfect sampling -- so that the same
+            circuit and seed give the same counts. It drives a private
+            ``torch.Generator``, leaving the global RNG untouched.
+        ``bit_order``
+            Layout of the counts keys: ``'q0_last'`` (the default, and
+            blueqat's long-standing order, where ``key[-1]`` is qubit 0) or
+            ``'q0_first'``, where ``key[i]`` is qubit i, as cloud APIs report
+            it. Keys are zero-padded to ``n_qubits`` in either order.
+        """
         from blueqat.backends import BACKENDS, DEFAULT_BACKEND_NAME
         
         if backend is None:
@@ -161,7 +177,10 @@ class Circuit:
         return backend.run(self.ops, self.n_qubits, returns='statevector', **kwargs)
 
     def shots(self, shots: int, backend: 'BackendUnion' = None, **kwargs) -> typing.Counter[str]:
-        """Run the circuit and get shot counts as a result."""
+        """Run the circuit and get shot counts as a result.
+
+        Accepts the same ``seed`` and ``bit_order`` arguments as
+        :meth:`~blueqat.circuit.Circuit.run`."""
         from blueqat.backends import DEFAULT_BACKEND_NAME
         if kwargs.get('returns'):
             raise ValueError('Circuit.shots has no argument `returns`.')
