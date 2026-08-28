@@ -207,6 +207,25 @@ values = [c.run(noise=nm, noise_scale=s, hamiltonian=h) for s in (1, 2, 3)]
 Density matrices have `4**n` entries, so this is for small circuits: about
 0.4 ms/gate at 8 qubits, 9 ms at 10, 183 ms at 12.
 
+### Clifford operators and randomized benchmarking
+```python
+from blueqat.clifford import Clifford, random_clifford
+
+c = Clifford.from_circuit(Circuit(2).h[0].cx[0, 1])  # a stabilizer tableau
+c.then(other)          # compose (c first), exactly, with no 2**n matrix
+c.inverse()            # ...and invert
+c.to_circuit()         # back to gates
+random_clifford(2, seed=0)   # uniform over the 11520 two-qubit Cliffords
+
+# Randomized benchmarking: a sequence plus the ONE Clifford that undoes it
+total = Clifford.identity(n)
+for i in range(m):
+    g = random_clifford(n, seed=i)
+    circuit += g.to_circuit()
+    total = total.then(g)
+circuit += total.inverse().to_circuit()   # survival is exactly 1 without noise
+```
+
 ### Exchange-only spin qubits (silicon quantum dots)
 ```python
 import blueqat.eo                      # registers the 'eo' backend

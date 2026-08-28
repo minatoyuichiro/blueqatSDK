@@ -38,6 +38,7 @@ blueqat ドキュメント（日本語）
    guide/backends
    guide/autograd
    guide/noise
+   guide/clifford
    guide/exchange_only
    guide/cloud
    guide/mcp
