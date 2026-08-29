@@ -586,6 +586,10 @@ def random_unitary(dim: int, seed: Optional[int] = None,
     quantities like the heavy-output probability of a random circuit.
 
     `seed` uses a private generator and leaves the global RNG alone.
+
+    Returns a ``torch.Tensor``, as everything else in this SDK does -- call
+    ``.numpy()`` on it before mixing with NumPy, or ``numpy`` operations will
+    fail on the tensor rather than converting it.
     """
     if dim < 1:
         raise ValueError(f"dim must be at least 1, got {dim}.")

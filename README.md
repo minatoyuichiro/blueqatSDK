@@ -203,6 +203,12 @@ nm.add(depolarizing(0.01), gates=['cx'])
 
 # noise_scale= is the zero-noise-extrapolation knob: same circuit, more noise
 values = [c.run(noise=nm, noise_scale=s, hamiltonian=h) for s in (1, 2, 3)]
+
+# Silicon spin qubits are dephased by noise that is *constant within a shot*
+# (nuclear fields, 1/f charge noise) -- not a Kraus channel, and the difference
+# shows: a Hahn echo refocuses this and does nothing to phase_damping.
+from blueqat.noise import QuasiStatic
+c.run(quasi_static=QuasiStatic(sigma=0.4), samples=4000, seed=1)
 ```
 Density matrices have `4**n` entries, so this is for small circuits: about
 0.4 ms/gate at 8 qubits, 9 ms at 10, 183 ms at 12.

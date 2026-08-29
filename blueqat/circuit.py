@@ -152,8 +152,12 @@ class Circuit:
         
         if backend is None:
             # Noise needs a density matrix, which the default backends do not carry;
-            # asking for noise is therefore also a choice of backend.
-            name = 'density' if kwargs.get('noise') is not None else DEFAULT_BACKEND_NAME
+            # asking for noise is therefore also a choice of backend. Quasi-static
+            # noise counts too: its result is an average over frozen detunings,
+            # which is a mixture and so needs a density matrix as well.
+            noisy = (kwargs.get('noise') is not None
+                     or kwargs.get('quasi_static') is not None)
+            name = 'density' if noisy else DEFAULT_BACKEND_NAME
             backend = self.__get_backend(name)
         elif isinstance(backend, str):
             backend = self.__get_backend(backend)

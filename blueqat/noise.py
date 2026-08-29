@@ -22,12 +22,13 @@ Both are consumed by ``Circuit.run(noise=...)``::
 """
 
 import itertools
+import math
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
 
 import torch
 
 __all__ = [
-    'Channel', 'NoiseModel',
+    'Channel', 'NoiseModel', 'QuasiStatic',
     'depolarizing', 'pauli_depolarizing', 'amplitude_damping', 'phase_damping',
     'kraus',
 ]
@@ -345,3 +346,54 @@ def as_noise_model(noise: Any) -> NoiseModel:
         return model
     raise TypeError("noise= expects a Channel, a list of Channels, or a NoiseModel; "
                     f"got {type(noise).__name__}.")
+
+
+class QuasiStatic:
+    """Per-qubit frequency offsets that are fixed within a shot and redrawn
+    between shots -- the dominant dephasing of silicon spin qubits.
+
+    Nuclear (Overhauser) fields and 1/f charge noise drift far more slowly than
+    a circuit runs, so each repetition sees an essentially constant detuning
+    while the average over repetitions is what decoheres. **That is not a Kraus
+    channel**: a channel has no memory, and the difference is not academic --
+    a Hahn echo refocuses a quasi-static offset and leaves a Markovian
+    dephasing channel untouched. Reproducing a T2* or an echo experiment needs
+    this, not :func:`phase_damping`.
+
+    Each shot draws an offset ``delta_q`` per qubit from ``N(0, sigma)`` and
+    accumulates a phase ``rz(delta_q * dt)`` on every qubit after each layer of
+    the circuit, so a refocusing pulse in the middle does what it does on
+    hardware. The results are averaged as density matrices, which is exactly
+    the classical mixture over the offsets.
+
+    `sigma` is in radians of accumulated phase per unit time, and `dt` is how
+    much time one circuit layer takes.
+    """
+
+    def __init__(self, sigma: float, dt: float = 1.0) -> None:
+        sigma = float(sigma)
+        if sigma < 0.0:
+            raise ValueError(f"sigma must be non-negative, got {sigma}.")
+        if float(dt) <= 0.0:
+            raise ValueError(f"dt must be positive, got {dt}.")
+        self.sigma = sigma
+        self.dt = float(dt)
+
+    def draw(self, n_qubits: int, rng: Any) -> List[float]:
+        """One shot's frozen offsets, one per qubit."""
+        return [rng.gauss(0.0, self.sigma) for _ in range(n_qubits)]
+
+    def scaled(self, factor: float) -> 'QuasiStatic':
+        """Scale the *noise strength* by `factor`.
+
+        Gaussian dephasing decays as ``exp(-(sigma t)**2 / 2)``, so scaling the
+        exponent -- the thing zero-noise extrapolation is linear in -- means
+        scaling `sigma` by ``sqrt(factor)``, not by `factor`.
+        """
+        factor = float(factor)
+        if factor < 0.0:
+            raise ValueError(f"noise_scale must be non-negative, got {factor}.")
+        return QuasiStatic(self.sigma * math.sqrt(factor), self.dt)
+
+    def __repr__(self) -> str:
+        return f"QuasiStatic(sigma={self.sigma}, dt={self.dt})"

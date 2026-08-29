@@ -59,6 +59,35 @@ def _measure_kraus(dtype: torch.dtype, device: torch.device) -> List[torch.Tenso
     return [k0, k1]
 
 
+def _interleave_layer_phases(gates: List[Operation], n_qubits: int,
+                             offsets: Sequence[float], dt: float) -> List[Operation]:
+    """Insert ``rz(offset_q * dt)`` on every qubit after each layer of `gates`.
+
+    A layer ends when an operation would reuse a qubit already busy in it (or at
+    a barrier), which is the ASAP schedule ``Circuit.depth()`` counts. Applying
+    the phase per layer rather than once at the end is what lets a refocusing
+    pulse in the middle of the circuit actually refocus.
+    """
+    from ..gate import RZGate
+
+    def phase_layer() -> List[Operation]:
+        return [RZGate((q, ), offsets[q] * dt)
+                for q in range(n_qubits) if offsets[q] != 0.0]
+
+    out: List[Operation] = []
+    busy: set = set()
+    for gate in gates:
+        qubits = set(gate.target_iter(n_qubits))
+        if gate.lowername == 'barrier' or (busy & qubits):
+            out.extend(phase_layer())
+            busy = set()
+        out.append(gate)
+        busy |= qubits
+    if busy:
+        out.extend(phase_layer())
+    return out
+
+
 def _superoperator(kraus: Sequence[torch.Tensor]) -> torch.Tensor:
     total: Optional[torch.Tensor] = None
     for k in kraus:
@@ -101,17 +130,26 @@ class DensityMatrixBackend(Backend):
 
         noise = kwargs.get("noise")
         model = as_noise_model(noise) if noise is not None else None
+        quasi_static = kwargs.get("quasi_static")
         noise_scale = kwargs.get("noise_scale", 1.0)
-        if model is not None and float(noise_scale) != 1.0:
-            model = model.scaled(float(noise_scale))
-        elif model is None and float(noise_scale) != 1.0:
-            raise ValueError("noise_scale= was given without noise=; there is nothing "
-                             "to scale.")
+        if float(noise_scale) != 1.0:
+            if model is None and quasi_static is None:
+                raise ValueError("noise_scale= was given without noise= or "
+                                 "quasi_static=; there is nothing to scale.")
+            if model is not None:
+                model = model.scaled(float(noise_scale))
+            if quasi_static is not None:
+                quasi_static = quasi_static.scaled(float(noise_scale))
+        samples = int(kwargs.get("samples", 200))
 
-        state = self._initial_state(kwargs.get("initial"), n_qubits, dtype, device)
-        state = self._run_gates(state, gates, n_qubits, model, dtype, device)
-
-        rho = state.reshape(1 << n_qubits, 1 << n_qubits)
+        initial = kwargs.get("initial")
+        if quasi_static is None:
+            state = self._initial_state(initial, n_qubits, dtype, device)
+            state = self._run_gates(state, gates, n_qubits, model, dtype, device)
+            rho = state.reshape(1 << n_qubits, 1 << n_qubits)
+        else:
+            rho = self._quasi_static_average(gates, n_qubits, model, quasi_static,
+                                             samples, seed, initial, dtype, device)
 
         if hamiltonian is not None:
             from ..utils import pauli_expectation
@@ -121,6 +159,33 @@ class DensityMatrixBackend(Backend):
             return rho
 
         return self._sample(rho, gates, n_qubits, shots, seed, bit_order)
+
+    def _quasi_static_average(self, gates: List[Operation], n_qubits: int, model: Any,
+                              quasi_static: Any, samples: int, seed: Optional[int],
+                              initial: Any, dtype: torch.dtype,
+                              device: torch.device) -> torch.Tensor:
+        """Average the density matrix over frozen per-qubit detunings.
+
+        Each sample holds its offsets fixed for the whole circuit -- that time
+        correlation is the entire point, and it is why an echo sequence
+        refocuses this noise while a dephasing channel survives one.
+        """
+        import random as _random
+
+        if samples < 1:
+            raise ValueError(f"samples must be at least 1, got {samples}.")
+        rng = _random.Random(seed)
+        dim = 1 << n_qubits
+        total: Optional[torch.Tensor] = None
+        for _ in range(samples):
+            offsets = quasi_static.draw(n_qubits, rng)
+            ops = _interleave_layer_phases(gates, n_qubits, offsets, quasi_static.dt)
+            state = self._initial_state(initial, n_qubits, dtype, device)
+            state = self._run_gates(state, ops, n_qubits, model, dtype, device)
+            rho = state.reshape(dim, dim)
+            total = rho if total is None else total + rho
+        assert total is not None
+        return total / samples
 
     # ------------------------------------------------------------------ state
 

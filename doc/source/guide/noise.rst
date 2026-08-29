@@ -73,6 +73,47 @@ name them:
 
 ``noise=`` also accepts a list of channels, applied in order.
 
+Quasi-static noise
+------------------
+
+Silicon spin qubits are not dephased mainly by a Markovian channel. Nuclear
+(Overhauser) fields and 1/f charge noise drift far more slowly than a circuit
+runs, so each repetition sees an essentially **constant** detuning and the
+average over repetitions is what decoheres. That correlation in time is not
+something Kraus operators can express, and the difference is measurable rather
+than academic:
+
+.. code-block:: python
+
+   from blueqat.noise import QuasiStatic
+
+   Circuit(1).h[0].i[0].i[0].run(quasi_static=QuasiStatic(sigma=0.4),
+                                 samples=4000, seed=1)
+
+Each sample freezes one detuning per qubit, drawn from ``N(0, sigma)``, and
+accumulates ``rz(delta_q * dt)`` on every qubit after each layer of the
+circuit; the resulting density matrices are averaged, which is exactly the
+classical mixture over detunings. Free induction decay then comes out Gaussian,
+``exp(-(sigma * t)**2 / 2)`` with `t` counted in layers.
+
+The sharp test is a **Hahn echo**: a flip in the middle of the wait undoes a
+static offset accumulated before it, and does nothing at all to a memoryless
+channel. Measured coherence, same circuit and same total wait:
+
+=========================  ==============  =============
+Noise                      Without echo    With echo
+=========================  ==============  =============
+``QuasiStatic(0.4)``       0.02            **0.92**
+``phase_damping(0.25)``    0.32            0.27
+=========================  ==============  =============
+
+So a T2* or echo experiment reproduced with :func:`~blueqat.noise.phase_damping`
+will give the wrong answer no matter how the rate is tuned.
+
+``samples`` sets how many detunings are averaged (200 by default); the error
+falls as ``1/sqrt(samples)``. Quasi-static noise composes with channels -- pass
+both ``quasi_static=`` and ``noise=``.
+
 Scaling the noise
 -----------------
 
@@ -94,6 +135,11 @@ and extrapolate the expectation value back to zero.
 
 A scale that would take a rate outside its valid range raises rather than
 being silently clipped, since a clipped point would quietly corrupt the fit.
+
+``noise_scale`` reaches quasi-static noise too, but scales ``sigma`` by
+``sqrt(c)`` rather than by ``c``: Gaussian dephasing decays as
+``exp(-(sigma t)**2 / 2)``, so it is ``sigma**2`` that the extrapolation is
+linear in.
 
 Results from a noisy run
 ------------------------
