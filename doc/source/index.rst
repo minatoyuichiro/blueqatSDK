@@ -44,6 +44,7 @@ Highlights
    guide/autograd
    guide/noise
    guide/clifford
+   guide/optimize
    guide/exchange_only
    guide/cloud
    guide/mcp

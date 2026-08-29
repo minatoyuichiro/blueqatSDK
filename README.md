@@ -226,6 +226,25 @@ for i in range(m):
 circuit += total.inverse().to_circuit()   # survival is exactly 1 without noise
 ```
 
+### Circuit optimization
+```python
+from blueqat.optimize import optimize
+
+optimize(Circuit(2).h[0].x[1].h[0])              # => Circuit(2).x[1]
+optimize(Circuit(2).rz(0.3)[0].x[1].rz(0.4)[0])  # => rz(0.7)[0] . x[1]
+
+# Every rewrite preserves the unitary exactly, global phase included: rz(2*pi)
+# is -I and is kept; rz(4*pi) is I and is dropped. Trainable (requires_grad)
+# angles are merged but never dropped, even at zero.
+
+# For exchange-only hardware the cost is the pulse count, and optimizing the
+# logical circuit first removes whole pulse sequences before they are emitted:
+import blueqat.eo
+logical = Circuit(2).x[0].x[0].cx[0, 1].cx[0, 1].h[1]
+len(logical.run(backend='eo').ops)             # 65 pulses
+len(optimize(logical).run(backend='eo').ops)   # 3
+```
+
 ### Exchange-only spin qubits (silicon quantum dots)
 ```python
 import blueqat.eo                      # registers the 'eo' backend
