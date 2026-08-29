@@ -65,6 +65,27 @@ The seed drives a private ``torch.Generator``, not ``torch.manual_seed``, so
 seeding a circuit does not disturb the RNG the rest of your program uses.
 Without ``seed=``, runs stay random exactly as before.
 
+Estimating from counts
+----------------------
+
+A ratio of two small counts is not an estimate. With 30000 trials and zero
+failures, the failure rate is not 0 -- it is "below roughly 1e-4", and code
+that divides by it produces either 0 or a meaningless spike depending on which
+side of the fraction the zero lands on. Before dividing, decide a minimum count
+and say so:
+
+.. code-block:: python
+
+   failures = counts.get('1', 0)
+   if failures < 10:
+       rate = None          # not enough events to estimate a ratio
+   else:
+       rate = failures / shots
+
+The same applies to comparing two runs: a ratio of two rates each built from a
+handful of events carries essentially no information, however many total shots
+were taken.
+
 Counts bit order
 ----------------
 

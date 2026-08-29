@@ -575,6 +575,33 @@ def gen_gray_controls(n: int) -> Iterator[Tuple[int, int, int]]:
             yield c0, c1, p
 
 
+def random_unitary(dim: int, seed: Optional[int] = None,
+                   device: Optional[torch.device] = None) -> torch.Tensor:
+    """A ``dim x dim`` unitary drawn from the Haar measure.
+
+    The usual recipe -- QR-decompose a complex Gaussian matrix and take Q -- is
+    **not** Haar distributed on its own, because QR does not fix the phases of
+    Q's columns. Multiplying by the phases of R's diagonal is what fixes it, and
+    omitting that step biases the distribution in a way that quietly shifts
+    quantities like the heavy-output probability of a random circuit.
+
+    `seed` uses a private generator and leaves the global RNG alone.
+    """
+    if dim < 1:
+        raise ValueError(f"dim must be at least 1, got {dim}.")
+    if device is None:
+        device = torch.device('cpu')
+    generator = None
+    if seed is not None:
+        generator = torch.Generator(device=device)
+        generator.manual_seed(int(seed))
+    real = torch.randn(dim, dim, dtype=torch.float64, device=device, generator=generator)
+    imag = torch.randn(dim, dim, dtype=torch.float64, device=device, generator=generator)
+    q, r = torch.linalg.qr(torch.complex(real, imag))
+    diagonal = torch.diagonal(r)
+    return q * (diagonal / torch.abs(diagonal)).unsqueeze(0)
+
+
 def check_unitarity(mat: torch.Tensor) -> bool:
     """Check whether mat is a unitary matrix."""
     if mat.dim() != 2 or mat.shape[0] != mat.shape[1]:

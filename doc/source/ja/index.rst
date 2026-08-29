@@ -38,6 +38,7 @@ blueqat ドキュメント（日本語）
    guide/backends
    guide/autograd
    guide/noise
+   guide/stabilizer
    guide/clifford
    guide/optimize
    guide/exchange_only

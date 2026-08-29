@@ -95,7 +95,7 @@ class Clifford:
         n = max(n, 1)
         tableau = cls.identity(n)
         for primitive, qubits in _primitive_ops(circuit, n):
-            tableau._apply_primitive(primitive, qubits)
+            tableau.apply_primitive(primitive, qubits)
         return tableau
 
     def copy(self) -> 'Clifford':
@@ -103,8 +103,14 @@ class Clifford:
 
     # ------------------------------------------------------- tableau updates
 
-    def _apply_primitive(self, name: str, qubits: Sequence[int]) -> None:
-        """Conjugate every stored image by `name`, i.e. left-multiply by it."""
+    def apply_primitive(self, name: str, qubits: Sequence[int]) -> None:
+        """Conjugate every stored row by `name`, i.e. left-multiply this operator
+        by that gate.
+
+        The same update also advances a stabilizer *state*, since a state's
+        stabilizer generators transform by conjugation exactly as an operator's
+        rows do -- which is what :mod:`blueqat.stabilizer` builds on.
+        """
         if name == 'h':
             (q,) = qubits
             bit = 1 << q
@@ -218,7 +224,7 @@ class Clifford:
 
         def emit(name: str, *qubits: int) -> None:
             gates.append((name, tuple(qubits)))
-            work._apply_primitive(name, qubits)
+            work.apply_primitive(name, qubits)
 
         for i in range(n):
             dest, stab = i, n + i
