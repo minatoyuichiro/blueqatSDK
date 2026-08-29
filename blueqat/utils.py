@@ -17,8 +17,9 @@ Refactored and merged into a unified utils.py module with robust Autograd tracki
 
 import cmath
 import math
+import re
 from collections import Counter, defaultdict, namedtuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import reduce
 from itertools import combinations, product
 from math import pi
@@ -456,6 +457,55 @@ def is_commutable(expr1: Any, expr2: Any, eps: float = 1e-8) -> bool:
     """Test whether expr1 and expr2 are commutable."""
     return sum((x * x.conjugate()).real for x in commutator(expr1, expr2).coeffs()) < eps
 
+_PAULI_TERM_RE = re.compile(r'([XYZI])\s*(?:\[\s*(\d+)\s*\]|(\d+))?')
+_PAULI_COEFF_RE = re.compile(r'^[+-]?\s*(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?')
+_PAULI_SPLIT_RE = re.compile(r'(?<![eE])(?=[+-])')
+
+
+def parse_hamiltonian(text: str) -> Expr:
+    """Parse a Pauli-expression string like ``"1.5*Z[0]*Z[1] - 0.5*X0 + 2"``
+    into an :class:`Expr`, without using `eval` (safe for untrusted input,
+    e.g. tool calls arriving over MCP).
+
+    Grammar: terms joined by ``+``/``-``; each term is an optional numeric
+    coefficient and a product of Pauli factors ``X/Y/Z/I`` with the qubit
+    index written as ``[n]`` or directly ``n``. ``*`` between factors is
+    optional. A term with no Pauli factor is a constant (times identity).
+    """
+    if not text or not text.strip():
+        raise ValueError('empty hamiltonian expression.')
+    total: Any = None
+    for raw_term in _PAULI_SPLIT_RE.split(text.replace(' ', '')):
+        term_src = raw_term.strip()
+        if not term_src:
+            continue
+        sign = -1.0 if term_src.startswith('-') else 1.0
+        body = term_src.lstrip('+-')
+        coeff = 1.0
+        m = _PAULI_COEFF_RE.match(body)
+        if m:
+            coeff = float(m.group(0))
+            body = body[m.end():]
+        body = body.lstrip('*')
+        term: Any = sign * coeff * I
+        consumed = 0
+        for pm in _PAULI_TERM_RE.finditer(body):
+            op, idx_a, idx_b = pm.groups()
+            idx = idx_a if idx_a is not None else idx_b
+            if op != 'I' and idx is None:
+                raise ValueError(
+                    f'Pauli factor {op!r} needs a qubit index in {raw_term!r}.')
+            if op != 'I':
+                term = term * pauli_from_char(op, int(idx))
+            consumed += len(pm.group(0))
+        if len(body.replace('*', '')) != consumed:
+            raise ValueError(f'Could not parse hamiltonian term: {raw_term!r}')
+        total = term if total is None else total + term
+    if total is None:
+        raise ValueError('empty hamiltonian expression.')
+    return total.to_expr().simplify()
+
+
 def qubo_bit(n: int) -> Expr:
     return 0.5 - 0.5 * Z[n]
 
@@ -525,6 +575,37 @@ def gen_gray_controls(n: int) -> Iterator[Tuple[int, int, int]]:
             yield c0, c1, p
 
 
+def random_unitary(dim: int, seed: Optional[int] = None,
+                   device: Optional[torch.device] = None) -> torch.Tensor:
+    """A ``dim x dim`` unitary drawn from the Haar measure.
+
+    The usual recipe -- QR-decompose a complex Gaussian matrix and take Q -- is
+    **not** Haar distributed on its own, because QR does not fix the phases of
+    Q's columns. Multiplying by the phases of R's diagonal is what fixes it, and
+    omitting that step biases the distribution in a way that quietly shifts
+    quantities like the heavy-output probability of a random circuit.
+
+    `seed` uses a private generator and leaves the global RNG alone.
+
+    Returns a ``torch.Tensor``, as everything else in this SDK does -- call
+    ``.numpy()`` on it before mixing with NumPy, or ``numpy`` operations will
+    fail on the tensor rather than converting it.
+    """
+    if dim < 1:
+        raise ValueError(f"dim must be at least 1, got {dim}.")
+    if device is None:
+        device = torch.device('cpu')
+    generator = None
+    if seed is not None:
+        generator = torch.Generator(device=device)
+        generator.manual_seed(int(seed))
+    real = torch.randn(dim, dim, dtype=torch.float64, device=device, generator=generator)
+    imag = torch.randn(dim, dim, dtype=torch.float64, device=device, generator=generator)
+    q, r = torch.linalg.qr(torch.complex(real, imag))
+    diagonal = torch.diagonal(r)
+    return q * (diagonal / torch.abs(diagonal)).unsqueeze(0)
+
+
 def check_unitarity(mat: torch.Tensor) -> bool:
     """Check whether mat is a unitary matrix."""
     if mat.dim() != 2 or mat.shape[0] != mat.shape[1]:
@@ -592,7 +673,9 @@ class AnsatzBase:
         on `sampler`: an exact sampler (e.g. `non_sampling_sampler`) keeps the
         autograd graph intact, while a genuinely stochastic one (e.g. one built from
         `get_measurement_sampler`) does not -- real shot noise isn't differentiable,
-        so that is expected, not a bug.
+        so that is expected, not a bug. To optimize through such a sampler anyway,
+        `Vqe` estimates the gradient with `parameter_shift_gradient` instead, which
+        it selects on its own by default.
         """
         val: Any = 0.0
 
@@ -694,6 +777,11 @@ class VqeResult:
     vqe: Optional['Vqe'] = None
     params: Optional[torch.Tensor] = None
     circuit: Optional[Circuit] = None
+    #: Objective value at every optimizer iteration, in order, so that a run can
+    #: be checked for convergence without re-running it with another optimizer.
+    #: `len(loss_history)` is the number of iterations actually taken (which is
+    #: below `max_iter` when the gradient-norm tolerance stopped the loop early).
+    loss_history: List[float] = field(default_factory=list)
     _probs: Optional[Dict[Tuple[int, ...], float]] = None
 
     def most_common(self, n: int = 1) -> Tuple[Tuple[Tuple[int, ...], float], ...]:
@@ -718,17 +806,54 @@ class VqeResult:
 
 class Vqe:
     def __init__(self, ansatz: AnsatzBase, optimizer_cls: Type[torch.optim.Optimizer] = torch.optim.Adam,
-                 optimizer_kwargs: Optional[Dict[str, Any]] = None, sampler: Optional[Callable[[Circuit, typing.Iterable[int]], Dict[Tuple[int, ...], float]]] = None) -> None:
+                 optimizer_kwargs: Optional[Dict[str, Any]] = None, sampler: Optional[Callable[[Circuit, typing.Iterable[int]], Dict[Tuple[int, ...], float]]] = None,
+                 seed: Optional[int] = None, gradient: str = 'auto') -> None:
+        """`seed` (also accepted per-call as `Vqe.run(seed=...)`) makes the whole run
+        deterministic: it fixes the random `initial_params` and re-seeds the sampler
+        if it is a seedable one (as built by `get_measurement_sampler`). Without it,
+        `run()` starts from `torch.rand` parameters, so repeated runs of the same
+        problem legitimately land in different local optima.
+
+        `gradient` picks how the optimizer gets its gradient:
+
+        ``'auto'``
+            The default. Backpropagate when the objective carries a gradient, and
+            fall back to the parameter-shift rule when it does not -- which is
+            exactly the shot-based case, where sampling has thrown the autograd
+            graph away.
+        ``'backprop'``
+            Always backpropagate. Fails on a sampler that estimates from shots.
+        ``'parameter_shift'``
+            Always use the shift rule. Exact, and the only option that works with
+            shot noise, but it costs two extra circuit evaluations per parametric
+            gate application.
+        """
+        if gradient not in ('auto', 'backprop', 'parameter_shift'):
+            raise ValueError("gradient must be 'auto', 'backprop' or 'parameter_shift', "
+                             f"got {gradient!r}.")
         self.ansatz = ansatz
         self.optimizer_cls = optimizer_cls
         self.optimizer_kwargs = optimizer_kwargs or {"lr": 0.05}
         self.sampler = sampler
         self.sampler_call_count = 0
+        self.seed = seed
+        self.gradient = gradient
 
     def run(self, max_iter: int = 500, tol: float = 1e-6, verbose: bool = False, device: Optional[torch.device] = None,
-            initial_params: Optional[torch.Tensor] = None) -> VqeResult:
+            initial_params: Optional[torch.Tensor] = None, seed: Optional[int] = None,
+            gradient: Optional[str] = None) -> VqeResult:
         if device is None: device = torch.device('cpu')
+        if seed is None: seed = self.seed
+        if gradient is None: gradient = self.gradient
+        if gradient not in ('auto', 'backprop', 'parameter_shift'):
+            raise ValueError("gradient must be 'auto', 'backprop' or 'parameter_shift', "
+                             f"got {gradient!r}.")
         self.sampler_call_count = 0
+        if seed is not None and hasattr(self.sampler, "set_seed"):
+            # One user-facing seed drives both sources of randomness. The sampler gets
+            # a derived (not identical) seed so that its draws are not correlated with
+            # the initial-parameter draws.
+            self.sampler.set_seed(int(seed) + 0x9E3779B9)
         counting_sampler = None
         if self.sampler is not None:
             def counting_sampler(circuit: Circuit, meas: typing.Iterable[int]) -> Dict[Tuple[int, ...], float]:
@@ -737,22 +862,49 @@ class Vqe:
         objective_fn = self.ansatz.get_objective(counting_sampler, device=device)
 
         if initial_params is None:
-            params = torch.rand(self.ansatz.n_params, dtype=torch.float64, device=device, requires_grad=True)
+            generator = None
+            if seed is not None:
+                generator = torch.Generator(device=device)
+                generator.manual_seed(int(seed))
+            params = torch.rand(self.ansatz.n_params, dtype=torch.float64, device=device,
+                                generator=generator).requires_grad_(True)
         else:
             params = torch.as_tensor(initial_params, dtype=torch.float64, device=device).clone().detach().requires_grad_(True)
             if params.shape != (self.ansatz.n_params,):
                 raise ValueError(f"initial_params must have shape ({self.ansatz.n_params},), got {tuple(params.shape)}")
         optimizer = self.optimizer_cls([params], **self.optimizer_kwargs)
-        
+
+        if counting_sampler is not None:
+            energy_of_circuit: Callable[[Circuit], Any] = \
+                lambda circuit: self.ansatz.get_energy(circuit, counting_sampler)
+        else:
+            energy_of_circuit = self.ansatz.get_energy_sparse
+
+        use_shift = gradient == 'parameter_shift'
+        if gradient == 'auto':
+            # A sampler that estimates from shots returns plain numbers, so the
+            # objective comes back with no graph to backpropagate through. That is
+            # the signal -- not a guess about which sampler was supplied.
+            probe = objective_fn(params)
+            use_shift = not (isinstance(probe, torch.Tensor) and probe.requires_grad)
+
+        loss_history: List[float] = []
         for idx in range(max_iter):
             optimizer.zero_grad()
-            loss = objective_fn(params)
-            loss.backward()
+            if use_shift:
+                loss, grad = parameter_shift_gradient(self.ansatz, params, energy_of_circuit)
+                params.grad = grad.to(dtype=params.dtype, device=params.device)
+            else:
+                loss = objective_fn(params)
+                loss.backward()
+            loss_history.append(float(loss.item()))
+            if verbose: print(f"iter {idx}: loss={loss_history[-1]}")
             optimizer.step()
             if params.grad is not None and torch.norm(params.grad) < tol: break
                 
         final_params = params.detach()
-        self._result = VqeResult(self, final_params, self.ansatz.get_circuit(final_params))
+        self._result = VqeResult(self, final_params, self.ansatz.get_circuit(final_params),
+                                 loss_history=loss_history)
         return self._result
 
 
@@ -777,7 +929,26 @@ def expect(qubits: torch.Tensor, meas: typing.Iterable[int]) -> Dict[Tuple[int, 
 def non_sampling_sampler(circuit: Circuit, meas: typing.Iterable[int]) -> Dict[Tuple[int, ...], float]:
     return expect(circuit.run(), meas)
 
-def get_measurement_sampler(n_sample: int, device: Optional[torch.device] = None) -> Callable[[Circuit, typing.Iterable[int]], Dict[Tuple[int, ...], float]]:
+def get_measurement_sampler(n_sample: int, device: Optional[torch.device] = None,
+                            seed: Optional[int] = None) -> Callable[[Circuit, typing.Iterable[int]], Dict[Tuple[int, ...], float]]:
+    """A sampler that estimates probabilities from `n_sample` simulated measurements.
+
+    With `seed` set, the sampler draws from its own generator instead of the global
+    RNG, so a VQE run using it is reproducible. The returned callable also carries a
+    `set_seed(seed)` method, which is what `Vqe.run(seed=...)` calls to put the whole
+    run -- initial parameters and sampling alike -- under a single seed."""
+    state: Dict[str, Optional[torch.Generator]] = {"generator": None}
+
+    def set_seed(new_seed: Optional[int]) -> None:
+        if new_seed is None:
+            state["generator"] = None
+            return
+        generator = torch.Generator(device=device or torch.device('cpu'))
+        generator.manual_seed(int(new_seed))
+        state["generator"] = generator
+
+    set_seed(seed)
+
     def sampling_by_measurement(circuit: Circuit, meas: typing.Iterable[int]) -> Dict[Tuple[int, ...], float]:
         meas_tuple = tuple(meas)
         statevector = circuit.run()
@@ -787,7 +958,8 @@ def get_measurement_sampler(n_sample: int, device: Optional[torch.device] = None
         # (cumsum + searchsorted) has no such limit. Same approach as TorchBackend.
         cdf = torch.cumsum(probs, dim=0)
         cdf[-1] = 1.0
-        u = torch.rand(n_sample, device=probs.device, dtype=probs.dtype)
+        u = torch.rand(n_sample, device=probs.device, dtype=probs.dtype,
+                       generator=state["generator"])
         samples = torch.searchsorted(cdf, u)
         unique_elements, counts = torch.unique(samples, return_counts=True)
         
@@ -796,7 +968,210 @@ def get_measurement_sampler(n_sample: int, device: Optional[torch.device] = None
             bit_key = tuple((idx.item() >> m) & 1 for m in meas_tuple)
             result_counts[bit_key] += count.item()
         return {k: v / n_sample for k, v in result_counts.items()}
+
+    sampling_by_measurement.set_seed = set_seed  # type: ignore[attr-defined]
     return sampling_by_measurement
+
+def pauli_expectation(hamiltonian: Any, state: torch.Tensor,
+                      n_qubits: int = -1) -> torch.Tensor:
+    """``<psi|H|psi>`` for a Pauli-expression `H`, without ever building `H` as a matrix.
+
+    A Pauli product is a signed permutation of basis states, so each term costs one
+    pass over the state. Forming the ``2**n x 2**n`` matrix first -- what
+    :meth:`Expr.to_matrix` does -- instead costs ``4**n``, which puts even 16 qubits
+    out of reach. Differentiable in both the state and tensor-valued coefficients.
+
+    `state` is either a statevector (1-D), giving ``<psi|H|psi>``, or a density
+    matrix (2-D), giving ``Tr(rho H)``. `n_qubits` defaults to the width implied by
+    the state.
+    """
+    if hasattr(hamiltonian, 'to_expr'):
+        hamiltonian = hamiltonian.to_expr()
+    expr = hamiltonian.simplify()
+
+    if state.dim() == 2:
+        return _density_pauli_expectation(expr, state, n_qubits)
+
+    statevector = state.reshape(-1)
+    dim = statevector.shape[0]
+    if dim & (dim - 1):
+        raise ValueError(f"statevector length must be a power of two, got {dim}.")
+    implied = dim.bit_length() - 1
+    if n_qubits == -1:
+        n_qubits = implied
+    elif (1 << n_qubits) != dim:
+        raise ValueError(f"statevector of length {dim} does not hold {n_qubits} qubits.")
+
+    max_n = expr.max_n()
+    if max_n >= n_qubits:
+        raise ValueError(f"Hamiltonian acts on qubit {max_n}, beyond the {n_qubits}-qubit state.")
+
+    device = statevector.device
+    bra = statevector.conj()
+    indices: Optional[torch.Tensor] = None
+    total: Any = None
+
+    for term in expr.terms:
+        term = term.simplify()
+        if not term.ops:
+            # Identity term: coeff * <psi|psi> (matching what the matrix form would
+            # give for an unnormalized state).
+            contribution = torch.as_tensor(term.coeff, dtype=statevector.dtype,
+                                           device=device) * torch.sum(bra * statevector)
+        else:
+            # `vals[c]` is the term's only nonzero entry in column c (coefficient
+            # included), sitting in row `c ^ flip`; so the sum below is exactly
+            # sum_c conj(psi[c ^ flip]) * vals[c] * psi[c].
+            vals = _term_to_dataarray(term, n_qubits, device).to(statevector.dtype)
+            flip = 0
+            for op in term.ops:
+                if op.op in ('X', 'Y'):
+                    flip |= 1 << op.n
+            if flip:
+                if indices is None:
+                    indices = torch.arange(dim, device=device)
+                out = bra[indices ^ flip]
+            else:
+                out = bra
+            contribution = torch.sum(out * vals * statevector)
+        total = contribution if total is None else total + contribution
+
+    if total is None:
+        return torch.zeros((), dtype=torch.float64, device=device)
+    return total.real
+
+
+def _density_pauli_expectation(expr: 'Expr', rho: torch.Tensor,
+                               n_qubits: int = -1) -> torch.Tensor:
+    """``Tr(rho H)``, the density-matrix counterpart of :func:`pauli_expectation`."""
+    dim = rho.shape[0]
+    if rho.shape[0] != rho.shape[1] or dim & (dim - 1):
+        raise ValueError(f"density matrix must be square with a power-of-two size, "
+                         f"got {tuple(rho.shape)}.")
+    implied = dim.bit_length() - 1
+    if n_qubits == -1:
+        n_qubits = implied
+    elif (1 << n_qubits) != dim:
+        raise ValueError(f"density matrix of size {dim} does not hold {n_qubits} qubits.")
+
+    max_n = expr.max_n()
+    if max_n >= n_qubits:
+        raise ValueError(f"Hamiltonian acts on qubit {max_n}, beyond the {n_qubits}-qubit state.")
+
+    device = rho.device
+    indices = torch.arange(dim, device=device)
+    total: Any = None
+    for term in expr.terms:
+        term = term.simplify()
+        if not term.ops:
+            contribution = torch.as_tensor(term.coeff, dtype=rho.dtype,
+                                           device=device) * torch.diagonal(rho).sum()
+        else:
+            # The term's only nonzero entry in column c sits in row `c ^ flip`, so
+            # Tr(rho P) = sum_r rho[r, r ^ flip] * vals[r].
+            vals = _term_to_dataarray(term, n_qubits, device).to(rho.dtype)
+            flip = 0
+            for op in term.ops:
+                if op.op in ('X', 'Y'):
+                    flip |= 1 << op.n
+            contribution = torch.sum(rho[indices, indices ^ flip] * vals)
+        total = contribution if total is None else total + contribution
+
+    if total is None:
+        return torch.zeros((), dtype=torch.float64, device=device)
+    return total.real
+
+
+#: Gates whose generator has exactly two eigenvalues one apart, which is what makes
+#: the two-term shift rule exact. Controlled rotations (crx/cry/crz) have four
+#: eigenvalues and need a four-term rule, so they are refused rather than
+#: silently given a wrong gradient.
+SHIFT_RULE_GATES = frozenset({
+    'rx', 'ry', 'rz', 'p', 'phase', 'r',
+    'rxx', 'ryy', 'rzz', 'cp', 'cphase', 'cr', 'exch', 'exchange',
+})
+
+
+def parameter_shift_gradient(
+        ansatz: 'AnsatzBase', params: torch.Tensor,
+        energy_of_circuit: Callable[[Circuit], Any]) -> Tuple[torch.Tensor, torch.Tensor]:
+    """The energy and its gradient at `params`, by the parameter-shift rule.
+
+    Backpropagation cannot see through a sampler: estimating an expectation value
+    from shots throws away the autograd graph, so shot-based VQE has no gradient
+    to descend. The shift rule gets one from the same estimator, by evaluating it
+    at shifted parameters instead of differentiating it.
+
+    Each gate's own derivative is ``(E(theta + pi/2) - E(theta - pi/2)) / 2``,
+    exact rather than a finite difference. Those are then chained onto `params`
+    through autograd, so a parameter feeding several gates -- as QAOA's angles do
+    -- correctly sums their contributions.
+
+    `energy_of_circuit` takes a circuit and returns its energy; the cost is two
+    of those evaluations per parametric gate application.
+    """
+    from .circuit_funcs.flatten import flatten
+
+    tracked = params.detach().clone().requires_grad_(True)
+    # Flattening expands named blocks and sliced targets, so that a gate applied
+    # to three qubits becomes three applications: the shift rule needs a term per
+    # application, not per written operation.
+    flat = flatten(ansatz.get_circuit(tracked))
+    ops = list(flat.ops)
+    n_qubits = flat.n_qubits
+
+    trainable: List[Tuple[int, torch.Tensor]] = []
+    base_ops: List[Any] = []
+    for i, op in enumerate(ops):
+        depends = any(isinstance(v, torch.Tensor) and v.requires_grad for v in op.params)
+        if not depends:
+            base_ops.append(op)
+            continue
+        if len(op.params) != 1:
+            raise ValueError(
+                f"{op.lowername} takes {len(op.params)} parameters; the shift rule "
+                f"here handles single-parameter gates only.")
+        if op.lowername not in SHIFT_RULE_GATES:
+            raise ValueError(
+                f"{op.lowername} does not satisfy the two-term parameter-shift rule "
+                f"(its generator has more than two eigenvalues). Rebuild the ansatz "
+                f"from {sorted(SHIFT_RULE_GATES)}, or optimize by backpropagation "
+                f"with an exact sampler.")
+        trainable.append((i, op.params[0]))
+        base_ops.append(type(op).create(op.targets,
+                                        (float(op.params[0].detach()), ), None))
+
+    def energy_at(op_list: List[Any]) -> float:
+        return float(energy_of_circuit(Circuit(n_qubits, list(op_list))))
+
+    value = torch.tensor(energy_at(base_ops), dtype=torch.float64)
+    if not trainable:
+        raise ValueError(
+            "No gate parameter depends on `params`. The shift rule needs the ansatz "
+            "to pass parameters into gates as tensors; converting them to Python "
+            "floats inside get_circuit() breaks the connection.")
+
+    derivatives = []
+    for index, _ in trainable:
+        theta = float(base_ops[index].params[0])
+        shifted = []
+        for offset in (pi / 2, -pi / 2):
+            variant = list(base_ops)
+            variant[index] = type(ops[index]).create(ops[index].targets,
+                                                     (theta + offset, ), None)
+            shifted.append(energy_at(variant))
+        derivatives.append(0.5 * (shifted[0] - shifted[1]))
+
+    angles = [angle for _, angle in trainable]
+    grad_outputs = [torch.as_tensor(d, dtype=angle.dtype, device=angle.device)
+                    for d, angle in zip(derivatives, angles)]
+    grads = torch.autograd.grad(angles, tracked, grad_outputs=grad_outputs,
+                                allow_unused=True)
+    gradient = grads[0]
+    if gradient is None:
+        gradient = torch.zeros_like(tracked)
+    return value, gradient.detach().to(params.dtype)
+
 
 def sparse_expectation(mat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
     mv = torch.sparse.mm(mat, vec.unsqueeze(1)).squeeze(1) if mat.is_sparse else torch.mv(mat, vec)

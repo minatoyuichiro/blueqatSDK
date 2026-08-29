@@ -91,6 +91,20 @@ Circuit(50).h[:].run(shots=3)
 Circuit(50).h[:].run(returns="amplitude", amplitude="0" * 50)
 ```
 
+### Reproducible sampling and counts bit order
+```python
+# seed= fixes every random draw of a run (shot sampling, mid-circuit collapse,
+# large-n perfect sampling). It drives a private torch.Generator, so it does not
+# disturb the global RNG your program uses.
+c = Circuit(4).h[:]
+c.run(shots=200, seed=42) == c.run(shots=200, seed=42)   # True
+
+# Counts keys are q_{n-1}...q_0 by default (qubit 0 rightmost). Cloud APIs use
+# the opposite order; bit_order= converts, always zero-padded to n_qubits.
+Circuit(3).x[0].run(shots=4)                        # => Counter({'001': 4})
+Circuit(3).x[0].run(shots=4, bit_order='q0_first')  # => Counter({'100': 4})
+```
+
 ### Single Amplitude
 ```python
 Circuit(4).h[:].run(amplitude="0101")
@@ -129,6 +143,20 @@ Circuit(4).x[:].run(hamiltonian=hamiltonian)
 Circuit(4).x[:].expect(hamiltonian)
 ```
 
+### Pauli exponentials and expectation values
+```python
+from blueqat.utils import X, Y, Z
+
+# exp(-i * theta * P) for a Pauli product P, given as {qubit: letter} so there
+# is no bit-order ambiguity. P**2 == I, so this is exactly cos(t) - i sin(t) P.
+Circuit().exp_pauli({0: 'X', 1: 'X', 2: 'Z', 3: 'Y'}, 0.3)   # exp(-0.3i XXZY)
+Circuit().exp_pauli({5: 'Z'}, 0.3)                           # == rz(0.6)[5]
+
+# Expectation of any Pauli expression, computed term-by-term over the
+# statevector (O(terms * 2**n)) instead of building a 2**n x 2**n matrix.
+Circuit(18).h[:].expect(1.0 * Z[0] * Z[1] - 0.5 * X[2])
+```
+
 ### Named gate blocks (nested subcircuits)
 ```python
 c = Circuit(7)
@@ -153,6 +181,101 @@ Circuit(2).h[0].cx[0, 1].probs()        # measurement probabilities (differentia
 Circuit(2).h[0].cx[0, 1].probs([1])     # marginal on selected qubits
 Circuit(2).h[0].cx[0, 1].depth()        # => 2
 Circuit(2).h[0].cx[0, 1].count_ops()    # => Counter({'h': 1, 'cx': 1})
+```
+
+### Noise and density matrices
+```python
+from blueqat.noise import depolarizing, amplitude_damping, NoiseModel
+
+# noise= switches the run onto a density-matrix simulation and applies the
+# channel after every gate. depolarizing(p) is the Nielsen & Chuang form,
+# (1-p)rho + p I/2**k, acting jointly on a two-qubit gate's qubits;
+# depolarizing(p, per_qubit=True) instead applies the one-qubit channel to each
+# of them (what papers assuming purely local noise mean -- a different map).
+Circuit(2).h[0].cx[0, 1].run(noise=depolarizing(0.01))              # rho
+Circuit(2).h[0].cx[0, 1].run(noise=depolarizing(0.01), shots=1000)  # counts
+Circuit(2).h[0].cx[0, 1].run(noise=depolarizing(0.01), hamiltonian=h)  # Tr(rho H)
+
+# Different rates per gate (real devices have worse two-qubit gates)
+nm = NoiseModel()
+nm.add(depolarizing(0.001))
+nm.add(depolarizing(0.01), gates=['cx'])
+
+# noise_scale= is the zero-noise-extrapolation knob: same circuit, more noise
+values = [c.run(noise=nm, noise_scale=s, hamiltonian=h) for s in (1, 2, 3)]
+
+# Silicon spin qubits are dephased by noise that is *constant within a shot*
+# (nuclear fields, 1/f charge noise) -- not a Kraus channel, and the difference
+# shows: a Hahn echo refocuses this and does nothing to phase_damping.
+from blueqat.noise import QuasiStatic
+c.run(quasi_static=QuasiStatic(sigma=0.4), samples=4000, seed=1)
+```
+Density matrices have `4**n` entries, so this is for small circuits: about
+0.4 ms/gate at 8 qubits, 9 ms at 10, 183 ms at 12.
+
+### Error correction
+```python
+from blueqat.qec import repetition_code, memory_experiment, PhenomenologicalNoise
+
+code = repetition_code(5)          # or rotated_surface_code(3)
+code.check()                       # generators really commute, logicals really pair
+code.logical_weight()              # brute-forced code distance, for small codes
+
+result = memory_experiment(code, rounds=5, shots=2000, seed=1,
+                           noise=PhenomenologicalNoise(p_data=0.02, p_measure=0.02))
+result.logical_error_rate
+
+# Circuit-level noise puts faults after every gate, measurement and reset, so
+# a single fault can ride an ancilla's later gates onto several data qubits --
+# a hook error. Which faults do depends on the interaction order, which is
+# therefore an argument: on the d=3 surface code the order alone moves the
+# logical error rate by nearly a factor of two.
+from blueqat.qec import CircuitLevelNoise
+memory_experiment(code, rounds=3, shots=6000, seed=4,
+                  noise=CircuitLevelNoise(p1=0.001, p2=0.01, p_measure=0.01),
+                  order=my_schedule)
+```
+Codes, syndrome circuits, decoders and experiments are separate pieces, so a
+decoder can be swapped or checked against a reference. The detector graph a
+matching decoder needs is built by injecting each error location and observing,
+not by hand-writing each code's geometry.
+
+### Clifford operators and randomized benchmarking
+```python
+from blueqat.clifford import Clifford, random_clifford
+
+c = Clifford.from_circuit(Circuit(2).h[0].cx[0, 1])  # a stabilizer tableau
+c.then(other)          # compose (c first), exactly, with no 2**n matrix
+c.inverse()            # ...and invert
+c.to_circuit()         # back to gates
+random_clifford(2, seed=0)   # uniform over the 11520 two-qubit Cliffords
+
+# Randomized benchmarking: a sequence plus the ONE Clifford that undoes it
+total = Clifford.identity(n)
+for i in range(m):
+    g = random_clifford(n, seed=i)
+    circuit += g.to_circuit()
+    total = total.then(g)
+circuit += total.inverse().to_circuit()   # survival is exactly 1 without noise
+```
+
+### Circuit optimization
+```python
+from blueqat.optimize import optimize
+
+optimize(Circuit(2).h[0].x[1].h[0])              # => Circuit(2).x[1]
+optimize(Circuit(2).rz(0.3)[0].x[1].rz(0.4)[0])  # => rz(0.7)[0] . x[1]
+
+# Every rewrite preserves the unitary exactly, global phase included: rz(2*pi)
+# is -I and is kept; rz(4*pi) is I and is dropped. Trainable (requires_grad)
+# angles are merged but never dropped, even at zero.
+
+# For exchange-only hardware the cost is the pulse count, and optimizing the
+# logical circuit first removes whole pulse sequences before they are emitted:
+import blueqat.eo
+logical = Circuit(2).x[0].x[0].cx[0, 1].cx[0, 1].h[1]
+len(logical.run(backend='eo').ops)             # 65 pulses
+len(optimize(logical).run(backend='eo').ops)   # 3
 ```
 
 ### Exchange-only spin qubits (silicon quantum dots)
@@ -184,15 +307,33 @@ seq_q = quantize_sequence(seq, step=2 * math.pi / 4096)
 schedule = to_schedule(physical)   # ASAP-parallel, JSON-ready pulse schedule
 ```
 
-### Cloud access (API key groundwork)
-```python
-import blueqat.cloud as cloud
-cloud.save_api_key("YOUR_API_KEY")   # stored in ~/.blueqat/config.json (0600)
-# or: export BLUEQAT_API_KEY=...    # environment variable takes priority
+### MCP server (use blueqat from Claude and other LLM clients)
+```
+pip install blueqat[mcp]
+```
+Register the `blueqat-mcp` command with an MCP client -- e.g. Claude Desktop's
+config:
+```json
+{ "mcpServers": { "blueqat": { "command": "blueqat-mcp" } } }
+```
+Tools: `run_circuit` (OpenQASM in, statevector/counts out), `circuit_stats`,
+`expectation_value` (Pauli-expression Hamiltonians like `"1.5*Z[0]*Z[1] - 0.5*X[0]"`),
+`draw_circuit` (diagram image), `eo_transpile` (exchange-only pulse compilation),
+`blueqat_info`. All inputs are parsed without `eval` -- safe for untrusted tool calls.
 
-import blueqat.cloud                 # registers the 'cloud' backend
-# Circuit(2).h[0].cx[0, 1].m[:].run(backend='cloud', shots=100)
-# (submits the JSON-serialized circuit once the public endpoint is live)
+### Cloud access (qapi.blueqat.app)
+```python
+import blueqat.cloud as cloud        # registers the 'cloud' backend
+cloud.save_api_key("YOUR_API_KEY")   # get one at https://mcp.blueqat.app/login
+# or: export BLUEQAT_API_KEY=...
+
+c = Circuit(2).h[0].cx[0, 1]
+c.m[:].run(backend='cloud', shots=100)          # counts (same conventions as local)
+c.run(backend='cloud')                          # statevector
+c.run(backend='cloud', hamiltonian=1.0 * Z[0])  # expectation value
+
+cloud.hardware_status()                          # real-QPU status (public)
+cloud.submit_hardware_job(c, shots=100, confirm=True)  # real hardware, real cost
 ```
 
 ### Blueqat to/from QASM
@@ -264,6 +405,27 @@ vqe = Vqe(MyAnsatz(hamiltonian, n_params=1))
 result = vqe.run(initial_params=torch.tensor([0.1]))  # initial_params is optional
 print(result.params, result.circuit.run())
 print(vqe.sampler_call_count)  # 0 unless a sampler was supplied to Vqe(...)
+
+# Without initial_params the run starts from random parameters, so repeated runs
+# reach different local optima. seed= makes the whole run deterministic (initial
+# parameters and, for a seedable sampler, its draws), and loss_history records
+# the objective at every iteration for convergence checks.
+result = Vqe(MyAnsatz(hamiltonian, n_params=1), seed=42).run()
+print(len(result.loss_history), result.loss_history[-1])
+```
+
+### Shot-based VQE (parameter-shift rule)
+```python
+from blueqat.utils import get_measurement_sampler
+
+# Sampling throws away the autograd graph, so a shot-based objective has no
+# gradient to backpropagate. Vqe notices and switches to the parameter-shift
+# rule, which is exact (not a finite difference) and chains correctly through
+# parameters that drive many gates, as QAOA's angles do.
+vqe = Vqe(ansatz, sampler=get_measurement_sampler(2000, seed=3), seed=42)
+result = vqe.run()
+
+# gradient='backprop' / 'parameter_shift' overrides the automatic choice.
 ```
 
 ### QAOA

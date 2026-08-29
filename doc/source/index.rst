@@ -42,8 +42,14 @@ Highlights
    guide/circuits
    guide/backends
    guide/autograd
+   guide/noise
+   guide/stabilizer
+   guide/clifford
+   guide/qec
+   guide/optimize
    guide/exchange_only
    guide/cloud
+   guide/mcp
 
 .. toctree::
    :maxdepth: 2

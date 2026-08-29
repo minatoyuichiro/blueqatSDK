@@ -131,11 +131,34 @@ class Circuit:
         return copied
 
     def run(self, backend: Optional[str] = None, *args, **kwargs) -> Any:
-        """Run the circuit. Passes parameters to the PyTorch-based backend."""
+        """Run the circuit. Passes parameters to the PyTorch-based backend.
+
+        Beyond the backend's own arguments (``shots``, ``returns``, ``mode``,
+        ``hamiltonian``, ``amplitude``, ``initial``, ...), two arguments shape
+        sampled results:
+
+        ``seed``
+            Fix every random draw of this run -- shot sampling, mid-circuit
+            collapse and large-``n`` perfect sampling -- so that the same
+            circuit and seed give the same counts. It drives a private
+            ``torch.Generator``, leaving the global RNG untouched.
+        ``bit_order``
+            Layout of the counts keys: ``'q0_last'`` (the default, and
+            blueqat's long-standing order, where ``key[-1]`` is qubit 0) or
+            ``'q0_first'``, where ``key[i]`` is qubit i, as cloud APIs report
+            it. Keys are zero-padded to ``n_qubits`` in either order.
+        """
         from blueqat.backends import BACKENDS, DEFAULT_BACKEND_NAME
         
         if backend is None:
-            backend = self.__get_backend(DEFAULT_BACKEND_NAME)
+            # Noise needs a density matrix, which the default backends do not carry;
+            # asking for noise is therefore also a choice of backend. Quasi-static
+            # noise counts too: its result is an average over frozen detunings,
+            # which is a mixture and so needs a density matrix as well.
+            noisy = (kwargs.get('noise') is not None
+                     or kwargs.get('quasi_static') is not None)
+            name = 'density' if noisy else DEFAULT_BACKEND_NAME
+            backend = self.__get_backend(name)
         elif isinstance(backend, str):
             backend = self.__get_backend(backend)
             
@@ -161,7 +184,10 @@ class Circuit:
         return backend.run(self.ops, self.n_qubits, returns='statevector', **kwargs)
 
     def shots(self, shots: int, backend: 'BackendUnion' = None, **kwargs) -> typing.Counter[str]:
-        """Run the circuit and get shot counts as a result."""
+        """Run the circuit and get shot counts as a result.
+
+        Accepts the same ``seed`` and ``bit_order`` arguments as
+        :meth:`~blueqat.circuit.Circuit.run`."""
         from blueqat.backends import DEFAULT_BACKEND_NAME
         if kwargs.get('returns'):
             raise ValueError('Circuit.shots has no argument `returns`.')
@@ -266,9 +292,57 @@ class Circuit:
             hamiltonian = hamiltonian.to_expr().simplify()
         return self.run(backend, hamiltonian=hamiltonian, **kwargs)
 
+    def exp_pauli(self, paulis: typing.Mapping[int, str], theta: Any) -> 'Circuit':
+        """Append ``exp(-i * theta * P)``, the time evolution of a single Pauli product.
+
+        `paulis` maps a qubit index to its Pauli letter, so the operator is stated
+        without reference to any bit order or overall width::
+
+            Circuit().exp_pauli({0: 'X', 1: 'X', 2: 'Z', 3: 'Y'}, 0.3)  # exp(-0.3i XXZY)
+
+        Since ``P**2 == I``, this is exactly ``cos(theta) - i sin(theta) P``. The
+        convention (no factor of 1/2) matches
+        :meth:`~blueqat.utils.Term.get_time_evolution`; note that a single-qubit
+        ``{q: 'Z'}`` is therefore ``rz(2 * theta)[q]``.
+
+        `theta` may be a ``torch.Tensor``, in which case the gradient flows through.
+        Letters are case-insensitive, and ``'I'`` entries are ignored. A product of
+        nothing but identities is a global phase, which a statevector does not carry,
+        so it appends no gates.
+        """
+        ops = []
+        for qubit, letter in paulis.items():
+            if not isinstance(qubit, int) or isinstance(qubit, bool) or qubit < 0:
+                raise ValueError(f"Qubit index must be a non-negative int, got {qubit!r}.")
+            letter = str(letter).upper()
+            if letter not in ('X', 'Y', 'Z', 'I'):
+                raise ValueError(f"Pauli letter must be one of X, Y, Z, I, got {letter!r}.")
+            if letter != 'I':
+                ops.append((qubit, letter))
+        if not ops:
+            return self
+        ops.sort()
+
+        half_pi = torch.pi / 2
+        # Rotate each factor into the Z basis (H X H = Z, RX(+pi/2) Y RX(-pi/2) = Z),
+        # accumulate the parity of the whole product onto the last qubit, rotate it by
+        # rz(2*theta), then undo both. Same construction as Term.get_time_evolution.
+        for qubit, letter in ops:
+            if letter == 'X': self.h[qubit]
+            elif letter == 'Y': self.rx(half_pi)[qubit]
+        for i in range(1, len(ops)):
+            self.cx[ops[i - 1][0], ops[i][0]]
+        self.rz(2 * theta)[ops[-1][0]]
+        for i in range(len(ops) - 1, 0, -1):
+            self.cx[ops[i - 1][0], ops[i][0]]
+        for qubit, letter in ops:
+            if letter == 'X': self.h[qubit]
+            elif letter == 'Y': self.rx(-half_pi)[qubit]
+        return self
+
     def block(self, name: str) -> '_BlockContext':
         """Group the operations appended inside the `with` body into a named,
-        nestable block (as in the sub-circuits of Shor's algorithm):
+        nestable block (as in the sub-circuits of Shor's algorithm)::
 
             c = Circuit(4)
             with c.block("QFT"):
@@ -327,14 +401,16 @@ class Circuit:
         return self
 
     def tree(self) -> str:
-        """A text rendering of the circuit's nested block structure:
+        """A text rendering of the circuit's nested block structure::
 
             Circuit(4)
             ├─ h[0]
             └─ QFT
                ├─ cphase(1.5708)[0, 1]
                └─ ...
-        """
+
+        Blocks appear by name with their contents beneath them; plain gates
+        outside any block are listed at the top level."""
         from .gate import GateBlock
 
         def _lines(ops, prefix: str):

@@ -53,6 +53,13 @@ Cloud
 .. automodule:: blueqat.cloud
    :members:
 
+MCP server
+----------
+
+.. automodule:: blueqat.mcp_server
+   :members: run_circuit, circuit_stats, expectation_value, draw_circuit_png,
+             eo_transpile, blueqat_info, build_server, main
+
 Circuit utilities
 -----------------
 

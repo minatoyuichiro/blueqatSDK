@@ -21,6 +21,7 @@ from typing import Any, Dict
 
 # Jupyterなど外部からの呼び出しでも絶対に迷子にならないよう絶対インポートに統一
 from blueqat.backends.backendbase import Backend, get_backend, register_backend
+from blueqat.backends.density_backend import DensityMatrixBackend
 from blueqat.backends.torch_backend import TorchBackend
 from blueqat.backends.draw_backend import DrawCircuit
 from blueqat.backends.tn_draw_backend import TNGraphDrawBackend
@@ -42,10 +43,22 @@ BACKENDS: Dict[str, Any] = {
     "2q_decomposition": TwoQubitGateDecomposingTranspiler,
     "composer": FlexibleCircuitComposer,
     
+    # 密度行列モード (雑音つき)
+    "density": lambda: DensityMatrixBackend(),
+
+    # スタビライザモード (Clifford回路のみ、大規模)
+    "stabilizer": lambda: _stabilizer_backend(),
+
     # ユーティリティ
     "draw": DrawCircuit,
     "draw_tn": TNGraphDrawBackend,
 }
+
+def _stabilizer_backend():
+    # 遅延インポート: blueqat.stabilizer は blueqat.circuit を必要とするため
+    from blueqat.stabilizer import StabilizerBackend
+    return StabilizerBackend()
+
 
 # デフォルトバックエンドを純PyTorch状態ベクトルに設定
 DEFAULT_BACKEND_NAME: str = "tensornet"

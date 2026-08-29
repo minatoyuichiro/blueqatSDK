@@ -15,11 +15,41 @@
 
 import copy
 from abc import ABC
+from collections import Counter
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type
+import typing
+
 from ..gate import IFallbackOperation, Operation
 
 # グローバルなバックエンド登録レジストリ
 _BACKEND_REGISTRY: Dict[str, Type['Backend']] = {}
+
+#: Accepted values of the `bit_order=` argument of `Circuit.run(shots=...)`.
+#: "q0_last" is blueqat's long-standing layout -- the leftmost character of a
+#: counts key is the highest-numbered qubit, so key[-1] is qubit 0. "q0_first"
+#: is the reverse, key[i] is qubit i, matching qapi.blueqat.app and most cloud
+#: APIs. Either way the key is exactly `n_qubits` characters wide.
+BIT_ORDERS: Tuple[str, ...] = ("q0_last", "q0_first")
+
+
+def apply_bit_order(counts: 'typing.Counter[str]', n_qubits: int,
+                    bit_order: str = "q0_last") -> 'typing.Counter[str]':
+    """Re-key a shot Counter, whose keys are in blueqat's own "q0_last" order,
+    into the requested qubit-to-character order.
+
+    Keys are zero-padded to exactly `n_qubits` characters first -- which is only
+    correct for "q0_last" input, since that is the order whose padding goes on the
+    left. Without the padding, a reversed "11" cannot be told apart from "000011"
+    (qubits 0 and 1) and "110000" (qubits 4 and 5), which is precisely the mistake
+    that hand-rolled reversals keep making.
+    """
+    if bit_order not in BIT_ORDERS:
+        raise ValueError(f"bit_order must be one of {BIT_ORDERS}, got {bit_order!r}.")
+    padded: 'typing.Counter[str]' = Counter()
+    for key, n in counts.items():
+        key = key.zfill(n_qubits)
+        padded[key[::-1] if bit_order == "q0_first" else key] += n
+    return padded
 
 
 class Backend(ABC):

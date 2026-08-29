@@ -37,8 +37,13 @@ blueqat ドキュメント（日本語）
    guide/circuits
    guide/backends
    guide/autograd
+   guide/noise
+   guide/stabilizer
+   guide/clifford
+   guide/optimize
    guide/exchange_only
    guide/cloud
+   guide/mcp
 
 APIリファレンス
 ---------------

@@ -95,7 +95,15 @@ def encode_state(logical_amplitudes: Sequence[Sequence[complex]],
 
 def leakage(state: torch.Tensor, triple: int = 0) -> float:
     """Population outside the S=1/2 subspace of the given 3-spin triple,
-    i.e. the weight in its fully symmetric S=3/2 quadruplet."""
+    i.e. the weight in its fully symmetric S=3/2 quadruplet.
+
+    `state` is either a statevector (1-D) or a density matrix (2-D), so leakage
+    can be read off a noisy run as well as a pure one -- which is the case that
+    matters, since it is decoherence that pushes population out of the encoded
+    subspace in the first place.
+    """
+    if state.dim() == 2:
+        return _leakage_density(state, triple)
     n_qubits = (state.numel() - 1).bit_length()
     n_triples = n_qubits // 3
     if not 0 <= triple < n_triples:
@@ -109,6 +117,28 @@ def leakage(state: torch.Tensor, triple: int = 0) -> float:
     t = t.permute(axes + rest).reshape(8, -1)
     proj = _QUAD.conj().T.to(t.dtype) @ t
     return float((proj.abs() ** 2).sum().real)
+
+
+def _leakage_density(rho: torch.Tensor, triple: int) -> float:
+    """``Tr(P rho)`` for `P` the quadruplet projector on `triple`."""
+    dim = rho.shape[0]
+    if rho.shape[0] != rho.shape[1]:
+        raise ValueError(f'density matrix must be square, got {tuple(rho.shape)}.')
+    n_qubits = (dim - 1).bit_length()
+    n_triples = n_qubits // 3
+    if not 0 <= triple < n_triples:
+        raise ValueError(f'triple must be in range(0, {n_triples}).')
+
+    axes = [n_qubits - 1 - (3 * triple + k) for k in (2, 1, 0)]
+    rest = [ax for ax in range(n_qubits) if ax not in axes]
+    order = axes + rest
+    # Bring the triple's three axes to the front on both the row and the column
+    # side, then trace over everything else.
+    t = rho.reshape((2, ) * (2 * n_qubits))
+    t = t.permute(order + [ax + n_qubits for ax in order])
+    t = t.reshape(8, 1 << len(rest), 8, 1 << len(rest))
+    quad = _QUAD.to(t.dtype)
+    return float(torch.einsum('ak,arbr,bk->', quad.conj(), t, quad).real)
 
 
 def logical_action(unitary8: torch.Tensor, m: str = '+',

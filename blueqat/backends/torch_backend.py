@@ -25,9 +25,25 @@ import torch
 import opt_einsum as oe
 
 from ..gate import *
-from .backendbase import Backend
+from .backendbase import Backend, BIT_ORDERS, apply_bit_order
 
 DEFAULT_SHOTS: int = 1024
+
+
+def _make_generator(seed: Optional[int], device: Any = "cpu") -> Optional[torch.Generator]:
+    """A private `torch.Generator` seeded from `seed`, or None when no seed was given.
+
+    A dedicated generator -- rather than `torch.manual_seed` -- means that asking a
+    circuit for reproducible shots does not disturb the process-wide RNG that the
+    rest of the user's program (weight init, data shuffling, ...) draws from.
+    Pass the result straight to `torch.rand(..., generator=...)`: `None` there is
+    exactly "use the default RNG", so the unseeded path is untouched.
+    """
+    if seed is None:
+        return None
+    generator = torch.Generator(device=device)
+    generator.manual_seed(int(seed))
+    return generator
 
 
 def _collect_measured_qubits(gates: List[Operation], n_qubits: int) -> Optional[set]:
@@ -321,7 +337,8 @@ class TorchBackend(Backend):
 
         return ctx
 
-    def _collapse_statevector_qubit(self, ctx: TorchBackendContext, target: int, force_zero: bool) -> int:
+    def _collapse_statevector_qubit(self, ctx: TorchBackendContext, target: int, force_zero: bool,
+                                    generator: Optional[torch.Generator] = None) -> int:
         """Probabilistically collapse `target` onto |0> or |1> (a real quantum measurement),
         renormalizing the statevector. If `force_zero`, additionally flips a |1> outcome back
         to |0> (this is what `reset` is). Returns the sampled bit (before any force-zero flip).
@@ -330,7 +347,7 @@ class TorchBackend(Backend):
         m = 1 << target
         t0, t1 = (idxs & m) == 0, (idxs & m) != 0
         p_zero = min(max(torch.sum(torch.abs(q[t0]) ** 2).item(), 0.0), 1.0)
-        bit = 0 if torch.rand(1).item() < p_zero else 1
+        bit = 0 if torch.rand(1, generator=generator).item() < p_zero else 1
 
         if bit == 0:
             norm = max(math.sqrt(p_zero), 1e-150)
@@ -349,7 +366,8 @@ class TorchBackend(Backend):
         return bit
 
     def _collapse_tensornet_qubit(self, ctx: TorchBackendContext, target: int, device: torch.device,
-                                   dtype: torch.dtype, force_zero: bool) -> int:
+                                   dtype: torch.dtype, force_zero: bool,
+                                   generator: Optional[torch.Generator] = None) -> int:
         """Tensor-network equivalent of `_collapse_statevector_qubit`. Computes qubit `target`'s
         marginal P(=0) by contracting the network against its own conjugate, samples an
         outcome, and attaches a (renormalized) projector as a new node for that axis -- exactly
@@ -388,7 +406,7 @@ class TorchBackend(Backend):
 
         p_zero = oe.contract(*contract_args, backend="torch").real.item()
         p_zero = min(max(p_zero, 0.0), 1.0)
-        bit = 0 if torch.rand(1).item() < p_zero else 1
+        bit = 0 if torch.rand(1, generator=generator).item() < p_zero else 1
 
         norm = max(math.sqrt(p_zero if bit == 0 else 1.0 - p_zero), 1e-150)
         new_axis = ctx.next_axis_id
@@ -437,7 +455,8 @@ class TorchBackend(Backend):
 
     def _run_one_shot_with_collapse(self, gates: List[Operation], n_qubits: int, mode: str,
                                      device: torch.device, dtype: torch.dtype,
-                                     initial: Optional[torch.Tensor]) -> TorchBackendContext:
+                                     initial: Optional[torch.Tensor],
+                                     generator: Optional[torch.Generator] = None) -> TorchBackendContext:
         """Runs the circuit once from scratch, performing a real probabilistic collapse
         at every `measure`/`reset` gate as it's encountered (a "quantum trajectory"
         simulation). This is needed whenever `reset` is used, since its effect on the rest
@@ -451,9 +470,11 @@ class TorchBackend(Backend):
                 measured = []
                 for t in gate.target_iter(n_qubits):
                     if ctx.mode == "statevector":
-                        bit = self._collapse_statevector_qubit(ctx, t, force_zero=False)
+                        bit = self._collapse_statevector_qubit(ctx, t, force_zero=False,
+                                                               generator=generator)
                     else:
-                        bit = self._collapse_tensornet_qubit(ctx, t, device, dtype, force_zero=False)
+                        bit = self._collapse_tensornet_qubit(ctx, t, device, dtype, force_zero=False,
+                                                             generator=generator)
                     ctx.cregs[t] = bit
                     measured.append(bit)
                 if gate.key is not None:
@@ -469,9 +490,11 @@ class TorchBackend(Backend):
             elif name == 'reset':
                 for t in gate.target_iter(n_qubits):
                     if ctx.mode == "statevector":
-                        self._collapse_statevector_qubit(ctx, t, force_zero=True)
+                        self._collapse_statevector_qubit(ctx, t, force_zero=True,
+                                                         generator=generator)
                     else:
-                        self._collapse_tensornet_qubit(ctx, t, device, dtype, force_zero=True)
+                        self._collapse_tensornet_qubit(ctx, t, device, dtype, force_zero=True,
+                                                       generator=generator)
             elif ctx.mode == "statevector":
                 ctx = self._apply_statevector_gate(ctx, gate)
             else:
@@ -480,11 +503,12 @@ class TorchBackend(Backend):
 
     def _run_with_collapse(self, gates: List[Operation], n_qubits: int, mode: str, device: torch.device,
                             dtype: torch.dtype, initial: Optional[torch.Tensor], shots: Optional[int],
-                            returns: Optional[str]) -> Any:
+                            returns: Optional[str], generator: Optional[torch.Generator] = None) -> Any:
         if shots is None and returns not in ("shots", "samples", "statevector_and_shots"):
             # No shots requested: a single trajectory's final state is enough (and, e.g.
             # for `x[:].reset[:]`, every trajectory converges on the same state anyway).
-            ctx = self._run_one_shot_with_collapse(gates, n_qubits, mode, device, dtype, initial)
+            ctx = self._run_one_shot_with_collapse(gates, n_qubits, mode, device, dtype, initial,
+                                                   generator)
             return self._flatten_state(ctx, n_qubits, device, dtype)
 
         n_shots = shots if shots is not None else DEFAULT_SHOTS
@@ -492,7 +516,8 @@ class TorchBackend(Backend):
         if returns == "samples":
             # 各ショットの `.m(key=...)` によるキー付き測定結果をそのまま返す
             return [
-                self._run_one_shot_with_collapse(gates, n_qubits, mode, device, dtype, initial).sample
+                self._run_one_shot_with_collapse(gates, n_qubits, mode, device, dtype, initial,
+                                                 generator).sample
                 for _ in range(n_shots)
             ]
 
@@ -500,7 +525,8 @@ class TorchBackend(Backend):
         shots_result: Counter = Counter()
         last_state: Optional[torch.Tensor] = None
         for _ in range(n_shots):
-            ctx = self._run_one_shot_with_collapse(gates, n_qubits, mode, device, dtype, initial)
+            ctx = self._run_one_shot_with_collapse(gates, n_qubits, mode, device, dtype, initial,
+                                                   generator)
             if returns == "statevector_and_shots":
                 # measure/reset で実際にcollapseした後の状態を、その測定結果と対応させて返す
                 last_state = self._flatten_state(ctx, n_qubits, device, dtype)
@@ -527,6 +553,12 @@ class TorchBackend(Backend):
         target_dtype = kwargs.get("dtype", self.dtype)
         hamiltonian = kwargs.get("hamiltonian", None)
         initial = kwargs.get("initial", None)
+        # `seed=` makes every random draw of this run reproducible; `bit_order=`
+        # picks how the resulting counts keys are laid out (see `apply_bit_order`).
+        seed = kwargs.get("seed", None)
+        bit_order = kwargs.get("bit_order", "q0_last")
+        if bit_order not in BIT_ORDERS:
+            raise ValueError(f"bit_order must be one of {BIT_ORDERS}, got {bit_order!r}.")
 
         # 💡 reset は途中経過の状態に確率的に依存するため、最終状態ベクトルを1回だけ
         #    計算してからサンプリングする高速パスでは表現できない。`.m(key=...)` も、
@@ -538,7 +570,14 @@ class TorchBackend(Backend):
         needs_collapse = returns in ("samples", "statevector_and_shots") or any(
             g.lowername == 'reset' or (g.lowername == 'measure' and g.key is not None) for g in gates)
         if needs_collapse:
-            return self._run_with_collapse(gates, n_qubits, run_mode, device, target_dtype, initial, shots, returns)
+            result = self._run_with_collapse(gates, n_qubits, run_mode, device, target_dtype, initial,
+                                             shots, returns, _make_generator(seed))
+            if returns == "statevector_and_shots":
+                state, counts = result
+                return state, apply_bit_order(counts, n_qubits, bit_order)
+            if isinstance(result, Counter):
+                return apply_bit_order(result, n_qubits, bit_order)
+            return result
 
         ctx = TorchBackendContext(n_qubits, run_mode, device, target_dtype, initial=initial)
         ctx = self._run_inner(ctx, gates, n_qubits)
@@ -605,12 +644,10 @@ class TorchBackend(Backend):
                 flattened_state = flattened_state[reversed_indices]
 
             if hamiltonian is not None:
-                h_mat = hamiltonian.to_matrix(n_qubits, device=device).to(target_dtype)
-                if h_mat.is_sparse:
-                    hv = torch.sparse.mm(h_mat, flattened_state.unsqueeze(1)).squeeze(1)
-                else:
-                    hv = h_mat @ flattened_state
-                return torch.vdot(flattened_state, hv).real
+                # Term-by-term on the statevector: O(terms * 2**n) rather than the
+                # 4**n it costs to build the Hamiltonian as a matrix first.
+                from ..utils import pauli_expectation
+                return pauli_expectation(hamiltonian, flattened_state, n_qubits)
 
             if returns == "statevector" or shots is None:
                 return flattened_state
@@ -633,13 +670,14 @@ class TorchBackend(Backend):
                 probs = torch.abs(flattened_state) ** 2
                 cdf = torch.cumsum(probs, dim=0)
                 cdf[-1] = 1.0  # 浮動小数点誤差でcdf[-1]が1未満になるのを防ぐ
-                u = torch.rand(n_shots, device=probs.device, dtype=probs.dtype)
+                u = torch.rand(n_shots, device=probs.device, dtype=probs.dtype,
+                               generator=_make_generator(seed, probs.device))
                 samples = torch.searchsorted(cdf, u)
                 samples &= keep_mask
             fmt = f"0{n_qubits}b"
             for idx in samples.tolist():
                 shots_result[format(idx, fmt)] += 1
-            return shots_result
+            return apply_bit_order(shots_result, n_qubits, bit_order)
         else:
             # 💡 【超大規模テンソルネットワーク用】 n_qubits > 28 でフル状態ベクトルを展開できない場合の
             #    逐次的な条件付きサンプリング (量子ビットを1つずつ確定していく "perfect sampling")。
@@ -652,6 +690,7 @@ class TorchBackend(Backend):
             #
             #    さらに、2番目以降の量子ビットでは同時確率 P(prefix, q_i=0) を、既に確定した
             #    prefix の確率 P(prefix) で正規化して初めて正しい条件付き確率 P(q_i=0 | prefix) になる。
+            generator = _make_generator(seed)
             with torch.no_grad():
                 for shot in range(n_shots):
                     bit_string = []
@@ -698,7 +737,7 @@ class TorchBackend(Backend):
                         cond_zero = joint_zero / prefix_prob if prefix_prob > 1e-300 else 0.0
                         cond_zero = min(max(cond_zero, 0.0), 1.0)
 
-                        chosen_bit = 0 if torch.rand(1).item() <= cond_zero else 1
+                        chosen_bit = 0 if torch.rand(1, generator=generator).item() <= cond_zero else 1
                         report_bit = chosen_bit if (measured_qubits is None or i in measured_qubits) else 0
                         bit_string.append(str(report_bit))
                         prefix_prob = joint_zero if chosen_bit == 0 else max(prefix_prob - joint_zero, 0.0)
@@ -711,4 +750,4 @@ class TorchBackend(Backend):
                     # bit_string[i] は qubit i の測定値。Blueqat標準 (qubit0が右端) に合わせて反転して結合する
                     shots_result["".join(reversed(bit_string))] += 1
 
-            return shots_result
+            return apply_bit_order(shots_result, n_qubits, bit_order)

@@ -65,6 +65,32 @@
    Circuit(2).h[0].cx[0, 1].probs([1])       # 量子ビット1の周辺確率
    Circuit(1).rx(0.4)[0].expect(1.0 * Z[0])  # <Z> = cos(0.4)
 
+観測量には任意のパウリ式が使えます（和も可）:
+``c.expect(1.0 * Z[0] * Z[1] - 0.5 * X[2])`` 、
+``c.run(hamiltonian=...)`` でも同じです。値はハミルトニアンを
+``2**n x 2**n`` の行列にせず、状態ベクトル上で項ごとに計算するため
+``O(項数 * 2**n)`` で済み、行列形式が現実的でなくなる13量子ビット付近を
+大きく超えて使えます。
+
+パウリ指数
+----------
+
+:meth:`~blueqat.circuit.Circuit.exp_pauli` は、パウリ積 ``P`` に対する
+``exp(-i * theta * P)`` を追加します。Trotter分解や化学・QAOAのアンザッツの
+基本部品です。演算子は「量子ビット番号 → パウリ文字」の辞書で与えるので、
+ビット順の曖昧さがなく、疎な積も短く書けます:
+
+.. code-block:: python
+
+   Circuit().exp_pauli({0: 'X', 1: 'X', 2: 'Z', 3: 'Y'}, 0.3)  # exp(-0.3i XXZY)
+   Circuit().exp_pauli({5: 'Z'}, t)                            # == rz(2t)[5]
+
+``P**2 == I`` なので、これは厳密に ``cos(theta) - i sin(theta) P`` です。
+規約（1/2 を付けない）は :meth:`~blueqat.utils.Term.get_time_evolution` と
+同じで、そちらは ``Term`` から同じ列を組み立てます。 ``theta`` には
+``torch.Tensor`` を渡せる（パラメータが微分可能なまま）ほか、 ``'I'`` の
+項は無視されます。
+
 逆回路
 ------
 
