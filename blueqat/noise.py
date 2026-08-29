@@ -368,6 +368,12 @@ class QuasiStatic:
 
     `sigma` is in radians of accumulated phase per unit time, and `dt` is how
     much time one circuit layer takes.
+
+    Counting the elapsed time: a phase is accumulated after **every** layer,
+    including the one that prepared the state, so a circuit of a preparation
+    layer followed by `t` idle layers has an effective duration of ``t + 1``.
+    Its coherence decays as ``exp(-(sigma * (t + 1) * dt)**2 / 2)``, not
+    ``exp(-(sigma * t * dt)**2 / 2)``.
     """
 
     def __init__(self, sigma: float, dt: float = 1.0) -> None:

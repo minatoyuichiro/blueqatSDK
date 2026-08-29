@@ -45,6 +45,7 @@ Highlights
    guide/noise
    guide/stabilizer
    guide/clifford
+   guide/qec
    guide/optimize
    guide/exchange_only
    guide/cloud

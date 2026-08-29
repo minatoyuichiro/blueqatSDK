@@ -213,6 +213,23 @@ c.run(quasi_static=QuasiStatic(sigma=0.4), samples=4000, seed=1)
 Density matrices have `4**n` entries, so this is for small circuits: about
 0.4 ms/gate at 8 qubits, 9 ms at 10, 183 ms at 12.
 
+### Error correction
+```python
+from blueqat.qec import repetition_code, memory_experiment, PhenomenologicalNoise
+
+code = repetition_code(5)          # or rotated_surface_code(3)
+code.check()                       # generators really commute, logicals really pair
+code.logical_weight()              # brute-forced code distance, for small codes
+
+result = memory_experiment(code, rounds=5, shots=2000, seed=1,
+                           noise=PhenomenologicalNoise(p_data=0.02, p_measure=0.02))
+result.logical_error_rate
+```
+Codes, syndrome circuits, decoders and experiments are separate pieces, so a
+decoder can be swapped or checked against a reference. The detector graph a
+matching decoder needs is built by injecting each error location and observing,
+not by hand-writing each code's geometry.
+
 ### Clifford operators and randomized benchmarking
 ```python
 from blueqat.clifford import Clifford, random_clifford
