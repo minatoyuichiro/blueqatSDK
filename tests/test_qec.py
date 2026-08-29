@@ -381,3 +381,23 @@ def test_the_decoder_is_deterministic():
     first = [decoder.decode(case) for case in cases]
     for _ in range(5):
         assert [decoder.decode(case) for case in cases] == first
+
+
+def test_a_decoder_belongs_to_the_rate_it_was_built_at():
+    """Edge weights are -log(p/(1-p)), so changing p can reorder two paths.
+
+    On the d=3 surface code the pair {12, 16} sits on such a crossing: at
+    p=0.005 the single fault joining them is the lighter explanation, and at
+    p=0.01 the two boundary paths tie it exactly and matching takes those
+    instead. Neither is wrong -- minimum-weight decoding is optimal on average,
+    not fault by fault -- but it means graphs built at different rates are not
+    comparable, and this pins that down rather than leaving it to be
+    rediscovered as a phantom bug.
+    """
+    code = rotated_surface_code(3)
+    verdicts = []
+    for rate in (0.005, 0.01):
+        graph = build_detector_graph(code, 3, circuit_level=True,
+                                     noise=CircuitLevelNoise.uniform(rate))
+        verdicts.append(MatchingDecoder(graph).decode([12, 16]))
+    assert verdicts == [0, 1]
