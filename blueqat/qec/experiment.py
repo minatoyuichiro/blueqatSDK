@@ -385,19 +385,42 @@ def build_detector_graph(code: StabilizerCode, rounds: int,
 
 def _error_locations(code: StabilizerCode, rounds: int, circuit_level: bool,
                      order: Optional[Callable]) -> List[Tuple]:
-    """Every fault the graph builder should try, as ``(location, error)`` pairs."""
+    """Every fault the graph builder should try, as ``(location, error)`` pairs.
+
+    Exactly the faults a noise model can actually produce, and no others.
+
+    The last round stands in for a perfect final readout: nothing goes wrong in
+    it, and there is no gap before it for a data qubit to decay in. So faults
+    live in rounds ``0 .. rounds-1`` only, and the last layer of detectors is
+    reached in combination rather than by any single fault.
+
+    Enumerating faults the sampler cannot generate is not harmless. They compete
+    for the same edges, and since an edge's observable attribution goes to
+    whichever mechanism is most likely, a fault that can never happen can carry
+    an edge the wrong way.
+    """
     out: List[Tuple] = []
-    for t in range(rounds + 1):
+    for t in range(rounds):
         out += [(('pre', q, t), 'X') for q in range(code.n_data)]
         out += [(('meas', i, t), True) for i in range(code.n_stabilizers)]
     if not circuit_level:
         return out
 
     ops = round_operations(code, order)
-    for t in range(rounds + 1):
+    for t in range(rounds):
         for k, op in enumerate(ops):
-            qubits = op[2]
-            if len(qubits) == 1:
+            kind, qubits = op[0], op[2]
+            if kind == 'measure':
+                # A faulty measurement reports the wrong bit; that is the
+                # ('meas', ...) location above, not a Pauli left behind here.
+                continue
+            if kind == 'reset':
+                # A failed reset leaves the qubit in |1>, which is an X and
+                # nothing else: Z would do nothing to |0> and Y is that same X
+                # up to a phase. Enumerating all three would credit each with
+                # the full reset rate and treble it.
+                out.append((('op', t, k), {qubits[0]: 'X'}))
+            elif len(qubits) == 1:
                 out += [(('op', t, k), {qubits[0]: p}) for p in 'XYZ']
             else:
                 a, b = qubits

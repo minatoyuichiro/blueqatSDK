@@ -229,7 +229,7 @@ result.logical_error_rate
 # a single fault can ride an ancilla's later gates onto several data qubits --
 # a hook error. Which faults do depends on the interaction order, which is
 # therefore an argument: on the d=3 surface code the order alone moves the
-# logical error rate by 45%.
+# logical error rate by nearly a factor of two.
 from blueqat.qec import CircuitLevelNoise
 memory_experiment(code, rounds=3, shots=6000, seed=4,
                   noise=CircuitLevelNoise(p1=0.001, p2=0.01, p_measure=0.01),

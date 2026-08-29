@@ -96,10 +96,10 @@ here on the repetition code, ``rounds = d``, 4000 shots:
 =======  ========  ========  ========
 ``p``    ``d=3``   ``d=5``   ``d=7``
 =======  ========  ========  ========
-0.02     0.0077    0.0020    0.0010
-0.05     0.0460    0.0330    0.0222
-0.10     0.1445    0.1573    0.1737
-0.20     0.3448    0.4175    0.4377
+0.02     0.0077    0.0018    0.0005
+0.05     0.0455    0.0283    0.0163
+0.10     0.1378    0.1398    0.1495
+0.20     0.3360    0.4005    0.4400
 =======  ========  ========  ========
 
 Below about 10% a longer code fails less; above it, longer fails more. That
@@ -111,13 +111,13 @@ The rotated surface code behaves the same way, ``rounds = d``, 1500 shots:
 =======  ========  ========
 ``p``    ``d=3``   ``d=5``
 =======  ========  ========
-0.005    0.0020    0.0007
-0.010    0.0120    0.0067
-0.020    0.0367    0.0400
-0.050    0.1680    0.2727
+0.005    0.0013    0.0007
+0.010    0.0087    0.0053
+0.020    0.0280    0.0333
+0.050    0.1600    0.2453
 =======  ========  ========
 
-The crossing here sits between 1% and 2%, below the ~3% this model is usually
+The crossing here sits just below 2%, against the ~3% this model is usually
 quoted at. Only two distances are being compared, so finite-size effects are
 large -- worth knowing before reading a number off a run like this.
 
@@ -145,19 +145,27 @@ ancilla visits its data qubits, and that order is an argument precisely so the
 question can be asked. Measured on the surface code, ``d=3``, ``p=0.003``,
 3000 shots:
 
-=========================  ====================  ==============
-Interaction order          Logical error rate    Hyperedges
-=========================  ====================  ==============
-ascending index            0.0307                327
-reversed                   0.0343                327
-``0,2,1,3``                0.0237                311
-=========================  ====================  ==============
+=========================  ====================
+Interaction order          Logical error rate
+=========================  ====================
+ascending index            0.0197
+reversed                   0.0167
+``0,2,1,3``                0.0103
+=========================  ====================
 
-A 45% spread from nothing but the order, with the count of faults that fire
-three or more detectors moving alongside it. Those faults cannot be represented
-in a matching graph at all; they are counted in ``graph.hyperedges`` and left
-out, which is the ordinary state of a matching decoder under circuit-level
-noise rather than something to paper over.
+Nearly a factor of two from nothing but the order. Enumerating every single
+fault instead of sampling shows why, and splits the damage in two. Some faults
+the matching graph *can* represent are still decoded wrongly, because two
+faults share a detector signature and disagree about the observable: no decoder
+reading only that signature can tell them apart, and their product is an
+undetectable logical error. The rest fire three or more detectors, which
+matching has no edge for at all; those are counted in ``graph.hyperedges`` and
+left out rather than mangled into one. Over all 1299 single faults, the
+ascending order is decoded wrongly 76 times and ``0,2,1,3`` 38 times.
+
+That second group is the ordinary state of a matching decoder under
+circuit-level noise, not something to paper over -- a hypergraph decoder would
+recover them.
 
 Edge weights
 ------------
@@ -174,3 +182,9 @@ to within the shot noise of 12000 shots -- sometimes one ahead, sometimes the
 other. The weights are principled and the machinery is there for models where
 the rates differ more sharply; on this evidence they are not what stands
 between these thresholds and the textbook ones.
+
+What the weights *do* decide is which explanation wins when two faults fire the
+same detectors and disagree about the observable. That makes it essential that
+the graph enumerate exactly the faults the noise model can produce and no
+others: a fault the sampler will never generate still gets a vote, and can
+carry an edge the wrong way.
