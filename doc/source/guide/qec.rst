@@ -118,7 +118,59 @@ The rotated surface code behaves the same way, ``rounds = d``, 1500 shots:
 =======  ========  ========
 
 The crossing here sits between 1% and 2%, below the ~3% this model is usually
-quoted at. Two reasons, both worth knowing before reading a number off a run
-like this: only two distances are being compared, so finite-size effects are
-large, and the matching graph gives every error the same weight rather than
-weighting by its likelihood.
+quoted at. Only two distances are being compared, so finite-size effects are
+large -- worth knowing before reading a number off a run like this.
+
+Circuit-level noise
+-------------------
+
+:class:`~blueqat.qec.CircuitLevelNoise` puts faults where they actually happen:
+after every gate, at every measurement, at every reset, and on idle data
+qubits.
+
+.. code-block:: python
+
+   from blueqat.qec import CircuitLevelNoise
+
+   memory_experiment(code, rounds=3, shots=6000, seed=4,
+                     noise=CircuitLevelNoise.uniform(0.005))
+   # or, closer to hardware, a two-qubit rate an order of magnitude larger:
+   CircuitLevelNoise(p1=0.001, p2=0.01, p_measure=0.01)
+
+The difference from the phenomenological model is not just "more places to go
+wrong". A fault landing between an ancilla's two-qubit gates rides the rest of
+them out onto **several** data qubits -- a hook error -- so one fault can
+become a weight-2 data error. Which faults do that depends on the order the
+ancilla visits its data qubits, and that order is an argument precisely so the
+question can be asked. Measured on the surface code, ``d=3``, ``p=0.003``,
+3000 shots:
+
+=========================  ====================  ==============
+Interaction order          Logical error rate    Hyperedges
+=========================  ====================  ==============
+ascending index            0.0307                327
+reversed                   0.0343                327
+``0,2,1,3``                0.0237                311
+=========================  ====================  ==============
+
+A 45% spread from nothing but the order, with the count of faults that fire
+three or more detectors moving alongside it. Those faults cannot be represented
+in a matching graph at all; they are counted in ``graph.hyperedges`` and left
+out, which is the ordinary state of a matching decoder under circuit-level
+noise rather than something to paper over.
+
+Edge weights
+------------
+
+Passing the noise model to :func:`~blueqat.qec.build_detector_graph` weights
+each edge by ``-log(p / (1 - p))`` instead of giving every fault the same
+weight, so matching prefers the more probable explanation when several faults
+fire the same detectors.
+
+It is worth saying what that bought here, which was nothing measurable. On the
+repetition code at ``d = 3, 5, 7``, both under a uniform rate and under a
+two-qubit rate ten times the one-qubit rate, weighted and flat decoding agreed
+to within the shot noise of 12000 shots -- sometimes one ahead, sometimes the
+other. The weights are principled and the machinery is there for models where
+the rates differ more sharply; on this evidence they are not what stands
+between these thresholds and the textbook ones.

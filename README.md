@@ -224,6 +224,16 @@ code.logical_weight()              # brute-forced code distance, for small codes
 result = memory_experiment(code, rounds=5, shots=2000, seed=1,
                            noise=PhenomenologicalNoise(p_data=0.02, p_measure=0.02))
 result.logical_error_rate
+
+# Circuit-level noise puts faults after every gate, measurement and reset, so
+# a single fault can ride an ancilla's later gates onto several data qubits --
+# a hook error. Which faults do depends on the interaction order, which is
+# therefore an argument: on the d=3 surface code the order alone moves the
+# logical error rate by 45%.
+from blueqat.qec import CircuitLevelNoise
+memory_experiment(code, rounds=3, shots=6000, seed=4,
+                  noise=CircuitLevelNoise(p1=0.001, p2=0.01, p_measure=0.01),
+                  order=my_schedule)
 ```
 Codes, syndrome circuits, decoders and experiments are separate pieces, so a
 decoder can be swapped or checked against a reference. The detector graph a

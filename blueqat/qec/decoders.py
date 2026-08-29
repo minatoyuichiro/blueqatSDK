@@ -42,16 +42,31 @@ class DetectorGraph:
     def __init__(self) -> None:
         self.edges: Dict[Tuple[Optional[int], Optional[int]], Tuple[float, bool]] = {}
         self.nodes: Set[int] = set()
+        #: Faults that fire three or more detectors, which matching cannot
+        #: represent. Counted rather than hidden: under circuit-level noise they
+        #: are a real part of the model, and a decoder that ignores them is
+        #: correspondingly imperfect.
+        self.hyperedges: int = 0
 
     def add_error(self, detectors: Sequence[Optional[int]], weight: float = 1.0,
-                  flips_observable: bool = False) -> None:
-        """Record an error that fires `detectors` (one or two of them)."""
+                  flips_observable: bool = False,
+                  on_hyperedge: str = 'raise') -> None:
+        """Record an error that fires `detectors` (one or two of them).
+
+        `on_hyperedge` says what to do with a fault firing more than two:
+        ``'raise'`` (the default) or ``'skip'``, which counts it in
+        :attr:`hyperedges` and moves on.
+        """
         ends = [d for d in detectors if d is not None]
         for node in ends:
             self.nodes.add(node)
         if len(ends) > 2:
+            self.hyperedges += 1
+            if on_hyperedge == 'skip':
+                return
             raise ValueError("An error touching more than two detectors cannot be "
-                             "matched; this decoder handles graph-like codes.")
+                             "matched; this decoder handles graph-like codes. Pass "
+                             "on_hyperedge='skip' to count and ignore them.")
         a = ends[0] if ends else None
         b = ends[1] if len(ends) > 1 else None
         key = (a, b) if (b is None or (a is not None and a <= b)) else (b, a)

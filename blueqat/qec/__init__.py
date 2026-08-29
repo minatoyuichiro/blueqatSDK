@@ -31,13 +31,15 @@ not a bit string over all of them.
 from .codes import StabilizerCode, repetition_code, rotated_surface_code
 from .circuits import index_order, syndrome_extraction_circuit, syndrome_round
 from .decoders import Decoder, DetectorGraph, MatchingDecoder
-from .experiment import (MemoryResult, PhenomenologicalNoise, build_detector_graph,
-                         deterministic_stabilizers, memory_experiment)
+from .experiment import (CircuitLevelNoise, MemoryResult, PhenomenologicalNoise,
+                         build_detector_graph, deterministic_stabilizers,
+                         memory_experiment, round_operations)
 
 __all__ = [
     'StabilizerCode', 'repetition_code', 'rotated_surface_code',
     'index_order', 'syndrome_extraction_circuit', 'syndrome_round',
     'Decoder', 'DetectorGraph', 'MatchingDecoder',
-    'MemoryResult', 'PhenomenologicalNoise', 'build_detector_graph',
-    'deterministic_stabilizers', 'memory_experiment',
+    'CircuitLevelNoise', 'MemoryResult', 'PhenomenologicalNoise',
+    'build_detector_graph', 'deterministic_stabilizers', 'memory_experiment',
+    'round_operations',
 ]

@@ -16,11 +16,11 @@
 import pytest
 
 from blueqat import Circuit
-from blueqat.qec import (DetectorGraph, MatchingDecoder, PhenomenologicalNoise,
-                         StabilizerCode, build_detector_graph, index_order,
-                         memory_experiment, repetition_code,
-                         rotated_surface_code, syndrome_extraction_circuit,
-                         syndrome_round)
+from blueqat.qec import (CircuitLevelNoise, DetectorGraph, MatchingDecoder,
+                         PhenomenologicalNoise, StabilizerCode,
+                         build_detector_graph, index_order, memory_experiment,
+                         repetition_code, rotated_surface_code, round_operations,
+                         syndrome_extraction_circuit, syndrome_round)
 
 
 # ---------------------------------------------------------------- the codes
@@ -261,3 +261,107 @@ def test_bad_experiment_parameters_are_refused():
         memory_experiment(code, rounds=1, noise=PhenomenologicalNoise(), shots=0)
     with pytest.raises(ValueError):
         PhenomenologicalNoise(p_data=1.5)
+
+
+# ------------------------------------------------------- circuit-level noise
+
+def test_round_operations_matches_the_circuit():
+    code = repetition_code(3)
+    ops = round_operations(code)
+    kinds = [op[0] for op in ops]
+    # Per stabilizer: h, two controlled gates, h, measure, reset.
+    assert kinds == ['gate', 'gate', 'gate', 'gate', 'measure', 'reset'] * 2
+
+
+def test_a_noiseless_circuit_level_memory_never_fails():
+    result = memory_experiment(repetition_code(3), rounds=3, shots=100, seed=1,
+                               noise=CircuitLevelNoise.uniform(0.0))
+    assert result.failures == 0
+
+
+def test_circuit_level_noise_causes_failures():
+    result = memory_experiment(repetition_code(3), rounds=3, shots=600, seed=1,
+                               noise=CircuitLevelNoise.uniform(0.01))
+    assert result.failures > 0
+
+
+def test_circuit_level_gains_from_distance_below_threshold():
+    # The circuit-level threshold sits well below the phenomenological one --
+    # there are far more places to go wrong per round -- so this is measured at
+    # a correspondingly lower rate.
+    noise = CircuitLevelNoise.uniform(0.005)
+    small = memory_experiment(repetition_code(3), rounds=3, noise=noise,
+                              shots=6000, seed=4)
+    large = memory_experiment(repetition_code(7), rounds=7, noise=noise,
+                              shots=6000, seed=4)
+    assert large.logical_error_rate < small.logical_error_rate
+
+
+def test_a_noise_model_gives_the_graph_non_uniform_weights():
+    # Passing a noise model weights each edge by -log(p/(1-p)) instead of giving
+    # every fault the same weight. Whether that improves decoding is a separate
+    # question -- measured, it did not, for these codes and rates -- but the
+    # weights themselves must reflect the model.
+    code = repetition_code(5)
+    flat = build_detector_graph(code, 3, circuit_level=True)
+    weighted = build_detector_graph(
+        code, 3, circuit_level=True,
+        noise=CircuitLevelNoise(p1=0.001, p2=0.01, p_measure=0.01))
+    assert {w for w, _ in flat.edges.values()} == {1.0}
+    assert len({round(w, 9) for w, _ in weighted.edges.values()}) > 1
+
+
+def test_a_weighted_decoder_still_decodes():
+    code = repetition_code(5)
+    noise = CircuitLevelNoise.uniform(0.005)
+    weighted = memory_experiment(code, rounds=5, noise=noise, shots=3000, seed=4)
+    assert 0.0 < weighted.logical_error_rate < 0.05
+
+
+def test_a_phenomenological_model_cannot_weight_gate_faults():
+    with pytest.raises(ValueError, match='CircuitLevelNoise'):
+        build_detector_graph(repetition_code(3), rounds=2, circuit_level=True,
+                             noise=PhenomenologicalNoise(0.01, 0.01))
+
+
+def test_circuit_level_is_reproducible():
+    kwargs = dict(rounds=3, noise=CircuitLevelNoise.uniform(0.01), shots=300)
+    a = memory_experiment(repetition_code(3), seed=2, **kwargs)
+    b = memory_experiment(repetition_code(3), seed=2, **kwargs)
+    assert a.failures == b.failures
+
+
+def test_the_interaction_order_changes_the_circuit_level_result():
+    # Hook errors: a fault between an ancilla's two-qubit gates rides the rest of
+    # them onto several data qubits, and which faults do that depends on the
+    # order. Under phenomenological noise there is nothing to depend on it.
+    code = rotated_surface_code(3)
+    reverse = lambda c, i: list(reversed(index_order(c, i)))
+    noise = CircuitLevelNoise.uniform(0.003)
+    forward = memory_experiment(code, rounds=3, noise=noise, shots=3000, seed=11)
+    backward = memory_experiment(code, rounds=3, noise=noise, shots=3000, seed=11,
+                                 order=reverse)
+    assert forward.logical_error_rate != backward.logical_error_rate
+
+
+def test_circuit_level_faults_include_hyperedges():
+    # A fault firing three or more detectors cannot be matched; the graph counts
+    # them rather than hiding them.
+    graph = build_detector_graph(rotated_surface_code(3), rounds=2,
+                                 circuit_level=True)
+    assert graph.hyperedges > 0
+
+
+def test_a_hyperedge_still_raises_by_default():
+    graph = DetectorGraph()
+    with pytest.raises(ValueError, match='more than two'):
+        graph.add_error([0, 1, 2])
+    graph.add_error([0, 1, 2], on_hyperedge='skip')
+    assert graph.hyperedges == 2
+
+
+def test_circuit_level_rates_are_validated():
+    with pytest.raises(ValueError):
+        CircuitLevelNoise(p2=1.5)
+    with pytest.raises(ValueError):
+        CircuitLevelNoise.uniform(-0.1)
