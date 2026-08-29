@@ -167,6 +167,23 @@ That second group is the ordinary state of a matching decoder under
 circuit-level noise, not something to paper over -- a hypergraph decoder would
 recover them.
 
+The time boundary
+~~~~~~~~~~~~~~~~~
+
+Some failures are neither, and no interaction order removes them. In the last
+detector layer, a fault on an ancilla and a fault on a boundary data qubit can
+light the *same single detector*: one flips the observable and the other does
+not, and the syndrome cannot tell them apart. Every round but the last is
+checked twice in time -- by itself and by the round after -- and the last one is
+not, so the effective distance halves there. Enumerating all 1299 single faults
+on the ``d=3`` surface code, thirteen such collisions survive under
+``0,2,1,3``; they are present under the ascending order too, alongside the
+order-dependent ones.
+
+More rounds dilute their share, and a different treatment of the final layer
+avoids them. Changing the gate order does not, because they do not come from
+gate order.
+
 Edge weights
 ------------
 

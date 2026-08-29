@@ -365,3 +365,19 @@ def test_circuit_level_rates_are_validated():
         CircuitLevelNoise(p2=1.5)
     with pytest.raises(ValueError):
         CircuitLevelNoise.uniform(-0.1)
+
+
+def test_the_decoder_is_deterministic():
+    """Same detectors, same verdict -- every time, in any process.
+
+    Minimum-weight matching can have several optima of equal weight, and if the
+    one returned depended on dictionary or set iteration order, a decoded result
+    would quietly differ between runs. It does not: this pins that down for a
+    range of inputs, including the degenerate ones.
+    """
+    code = rotated_surface_code(3)
+    decoder = MatchingDecoder(build_detector_graph(code, 2, circuit_level=True))
+    cases = [[], [0], [3], [0, 3], [0, 1, 2], [8, 9], [0, 8, 9, 15]]
+    first = [decoder.decode(case) for case in cases]
+    for _ in range(5):
+        assert [decoder.decode(case) for case in cases] == first
