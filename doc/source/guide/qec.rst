@@ -207,12 +207,21 @@ others: a fault the sampler will never generate still gets a vote, and can
 carry an edge the wrong way.
 
 It also means **a decoder belongs to the rate it was built at**. Weights are
-``-log(p / (1 - p))``, so changing `p` moves them, and not all by the same
-amount -- one path can overtake another. On the ``d=3`` surface code the
-detector pair ``{12, 16}`` sits right on such a crossing: at ``p = 0.005`` the
-single fault joining them is the lighter explanation and the fault decodes
-correctly, while at ``p = 0.01`` the two boundary paths tie it exactly and the
-matching takes them instead, decoding it wrongly.
+``-log(p / (1 - p))``, so changing `p` moves them by different amounts, and one
+explanation can overtake another. On the ``d=3`` surface code the detector pair
+``{12, 16}`` is close enough to such a crossover to fall on either side of it:
+
+=========  =============  ================  ============================
+``p``      Direct edge    Two boundaries    Cheaper explanation
+=========  =============  ================  ============================
+0.005      8.0060342      8.7055254         the direct edge, by 0.6995
+0.010      7.3125535      7.2908808         the boundaries, by 0.0217
+=========  =============  ================  ============================
+
+The single fault that actually joins ``12`` and ``16`` does not cross the
+observable; going out to the boundary twice does. So the same syndrome decodes
+correctly at ``p = 0.005`` and wrongly at ``p = 0.01``, purely because the
+weights reordered.
 
 Neither answer is a bug -- minimum-weight decoding is optimal on average, not
 fault by fault -- but it does mean two runs whose graphs were built at
