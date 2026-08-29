@@ -218,6 +218,41 @@ def test_a_decoder_that_always_says_no_flip_does_worse():
     assert matched.logical_error_rate < naive.logical_error_rate
 
 
+# ------------------------------------------------- the surface code memory
+
+def test_x_checks_are_not_detectors_in_the_first_round():
+    # |0...0> fixes the Z-type checks but not the X-type ones, so a first-round
+    # X outcome is a fair coin even with no errors -- it cannot be a detector.
+    from blueqat.qec import deterministic_stabilizers
+    code = rotated_surface_code(3)
+    known = deterministic_stabilizers(code)
+    assert sum(known) == 4 and len(known) == 8
+    assert all(deterministic_stabilizers(repetition_code(5)))
+
+
+def test_the_surface_code_detector_graph_builds():
+    # Regression: this used to raise "the error-free run already fires
+    # detectors", because the random first-round X outcomes were being compared
+    # against zero.
+    graph = build_detector_graph(rotated_surface_code(3), rounds=3)
+    assert graph.nodes and graph.edges
+
+
+def test_a_noiseless_surface_code_memory_never_fails():
+    result = memory_experiment(rotated_surface_code(3), rounds=3, shots=60, seed=1,
+                               noise=PhenomenologicalNoise())
+    assert result.failures == 0
+
+
+def test_the_surface_code_gains_from_distance_below_threshold():
+    noise = PhenomenologicalNoise(p_data=0.005, p_measure=0.005)
+    small = memory_experiment(rotated_surface_code(3), rounds=3, noise=noise,
+                              shots=1500, seed=5)
+    large = memory_experiment(rotated_surface_code(5), rounds=5, noise=noise,
+                              shots=1500, seed=5)
+    assert large.logical_error_rate < small.logical_error_rate
+
+
 def test_bad_experiment_parameters_are_refused():
     code = repetition_code(3)
     with pytest.raises(ValueError):

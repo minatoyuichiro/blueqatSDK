@@ -28,7 +28,7 @@ from .codes import StabilizerCode
 from .decoders import DetectorGraph, MatchingDecoder
 
 __all__ = ['PhenomenologicalNoise', 'MemoryResult', 'build_detector_graph',
-           'memory_experiment']
+           'deterministic_stabilizers', 'memory_experiment']
 
 #: An error location: ('data', qubit, round) is an X on that data qubit just
 #: before that round's measurement; ('meas', stabilizer, round) flips what that
@@ -135,14 +135,37 @@ def _run_shot(code: StabilizerCode, rounds: int, errors: Dict[Location, bool],
     return syndromes, observable
 
 
-def _detectors(syndromes: Sequence[Sequence[int]], n_stabilizers: int) -> List[int]:
-    """Which detectors fired: a detector is a syndrome bit differing from the
-    same bit in the previous round (the first round is compared against 0)."""
+def deterministic_stabilizers(code: StabilizerCode) -> List[bool]:
+    """Which stabilizers already have a known value in the starting state.
+
+    A memory experiment starts every data qubit in ``|0>``, which is an
+    eigenstate of a Z-only stabilizer but not of one containing an X or a Y. The
+    first measurement of an X-type check is therefore a fair coin even with no
+    errors at all, and comparing it against zero would make it fire every other
+    shot -- so it is not a detector, and only its *change* from the next round
+    onward is.
+    """
+    return [all(p in 'IZ' for p in stabilizer) for stabilizer in code.stabilizers]
+
+
+def _detectors(syndromes: Sequence[Sequence[int]], code: StabilizerCode) -> List[int]:
+    """Which detectors fired.
+
+    A detector is a syndrome bit differing from the same bit in the previous
+    round. In the first round there is no previous round: a stabilizer whose
+    value the initial state fixes is compared against that value, and one whose
+    value is random contributes no detector at all.
+    """
+    n_stabilizers = len(code.stabilizers)
+    known = deterministic_stabilizers(code)
     fired = []
     for t, row in enumerate(syndromes):
-        previous = syndromes[t - 1] if t else [0] * n_stabilizers
         for i, bit in enumerate(row):
-            if bit ^ previous[i]:
+            if t == 0:
+                if known[i] and bit:
+                    fired.append(i)
+                continue
+            if bit ^ syndromes[t - 1][i]:
                 fired.append(t * n_stabilizers + i)
     return fired
 
@@ -158,7 +181,7 @@ def build_detector_graph(code: StabilizerCode, rounds: int) -> DetectorGraph:
     """
     graph = DetectorGraph()
     baseline_syndromes, baseline_observable = _run_shot(code, rounds, {})
-    baseline = set(_detectors(baseline_syndromes, code.n_stabilizers))
+    baseline = set(_detectors(baseline_syndromes, code))
     if baseline:
         raise ValueError("The error-free run already fires detectors; the code's "
                          "initial state is not in its own codespace.")
@@ -171,7 +194,7 @@ def build_detector_graph(code: StabilizerCode, rounds: int) -> DetectorGraph:
 
     for location in locations:
         syndromes, observable = _run_shot(code, rounds, {location: True})
-        fired = _detectors(syndromes, code.n_stabilizers)
+        fired = _detectors(syndromes, code)
         if not fired and observable == baseline_observable:
             continue          # invisible and harmless: nothing to decode
         graph.add_error(fired, weight=1.0,
@@ -200,7 +223,7 @@ def memory_experiment(code: StabilizerCode, rounds: int,
     for _ in range(shots):
         errors = noise.sample(code, rounds, rng)
         syndromes, observable = _run_shot(code, rounds, errors, rng)
-        prediction = decoder.decode(_detectors(syndromes, code.n_stabilizers))
+        prediction = decoder.decode(_detectors(syndromes, code))
         if prediction != observable:
             failures += 1
     return MemoryResult(code, rounds, shots, failures)

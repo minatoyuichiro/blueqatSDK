@@ -52,10 +52,29 @@ chosen for that reason belongs to the experiment, so it is passed in:
 
    syndrome_round(code, order=my_schedule)   # my_schedule(code, index) -> qubits
 
+What counts as a detector
+-------------------------
+
+A detector is a syndrome bit differing from the same bit in the previous round.
+The first round has no previous round, and there the initial state matters: all
+data qubits start in ``|0>``, which fixes every Z-only stabilizer at ``+1`` but
+leaves an X-type check a **fair coin even with no errors at all**. So a Z-type
+check's first outcome is compared against its known value, and an X-type
+check's first outcome is not a detector -- only its change from the second
+round onward is. :func:`~blueqat.qec.deterministic_stabilizers` says which is
+which.
+
+Getting this wrong is not subtle in its symptoms: the error-free run starts
+firing detectors half the time, which
+:func:`~blueqat.qec.build_detector_graph` refuses outright rather than
+building a graph around it.
+
 Decoders
 --------
 
-A decoder is anything with ``decode(detectors) -> 0 or 1``.
+A decoder is anything with ``decode(detectors) -> 0 or 1``, where `detectors`
+is **the ids of the detectors that fired** -- not a bit string over all of
+them. An empty list means nothing fired.
 :class:`~blueqat.qec.MatchingDecoder` does exact minimum-weight perfect matching
 over a :class:`~blueqat.qec.DetectorGraph`.
 
@@ -86,3 +105,20 @@ here on the repetition code, ``rounds = d``, 4000 shots:
 Below about 10% a longer code fails less; above it, longer fails more. That
 crossing is the threshold, and for this code and noise model it should sit near
 10.9%, where the equivalent random-bond Ising model orders.
+
+The rotated surface code behaves the same way, ``rounds = d``, 1500 shots:
+
+=======  ========  ========
+``p``    ``d=3``   ``d=5``
+=======  ========  ========
+0.005    0.0020    0.0007
+0.010    0.0120    0.0067
+0.020    0.0367    0.0400
+0.050    0.1680    0.2727
+=======  ========  ========
+
+The crossing here sits between 1% and 2%, below the ~3% this model is usually
+quoted at. Two reasons, both worth knowing before reading a number off a run
+like this: only two distances are being compared, so finite-size effects are
+large, and the matching graph gives every error the same weight rather than
+weighting by its likelihood.

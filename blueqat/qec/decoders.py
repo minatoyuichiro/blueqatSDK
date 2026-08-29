@@ -13,10 +13,16 @@
 # limitations under the License.
 """Decoders.
 
-A decoder is anything with ``decode(detectors) -> int``: given which detectors
-fired, say whether the logical observable was flipped. Keeping that interface
-narrow is deliberate -- swapping in another decoder, or checking one against an
-exact reference, should not require touching the experiment around it.
+A decoder is anything with ``decode(detectors) -> int``, where `detectors` is
+**the ids of the detectors that fired** -- not a bit string over all detectors.
+An empty list means nothing fired. (Handing it a full bit string of zeros would
+read as "detector 0 fired", which is the kind of quiet mistake an ambiguous
+signature invites, so it is spelled out on every method here.)
+
+Given those ids the decoder says whether the logical observable was flipped.
+Keeping the interface that narrow is deliberate: swapping in another decoder,
+or checking one against an exact reference, should not require touching the
+experiment around it.
 """
 
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -82,9 +88,11 @@ class DetectorGraph:
 
 
 class Decoder:
-    """Interface: ``decode(detectors) -> 0 or 1``."""
+    """Interface: ``decode(fired_detector_ids) -> 0 or 1``."""
 
     def decode(self, detectors: Iterable[int]) -> int:
+        """`detectors` is the ids of the detectors that fired (an empty
+        iterable when none did), not a bit string over all detectors."""
         raise NotImplementedError
 
 
@@ -104,6 +112,7 @@ class MatchingDecoder(Decoder):
         self._paths = graph.shortest_paths()
 
     def decode(self, detectors: Iterable[int]) -> int:
+        """`detectors` is the ids of the detectors that fired, not a bit string."""
         defects = sorted(set(detectors))
         if not defects:
             return 0

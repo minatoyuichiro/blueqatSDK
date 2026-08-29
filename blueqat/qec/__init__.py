@@ -23,18 +23,21 @@
 The four pieces are kept apart on purpose: a code says what to measure, a
 circuit says how, a decoder says what the outcomes meant, and an experiment
 puts them together. Each can be replaced without the others noticing.
+
+A decoder's ``decode(detectors)`` takes **the ids of the detectors that fired**,
+not a bit string over all of them.
 """
 
 from .codes import StabilizerCode, repetition_code, rotated_surface_code
 from .circuits import index_order, syndrome_extraction_circuit, syndrome_round
 from .decoders import Decoder, DetectorGraph, MatchingDecoder
 from .experiment import (MemoryResult, PhenomenologicalNoise, build_detector_graph,
-                         memory_experiment)
+                         deterministic_stabilizers, memory_experiment)
 
 __all__ = [
     'StabilizerCode', 'repetition_code', 'rotated_surface_code',
     'index_order', 'syndrome_extraction_circuit', 'syndrome_round',
     'Decoder', 'DetectorGraph', 'MatchingDecoder',
     'MemoryResult', 'PhenomenologicalNoise', 'build_detector_graph',
-    'memory_experiment',
+    'deterministic_stabilizers', 'memory_experiment',
 ]
