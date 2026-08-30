@@ -101,8 +101,13 @@ class DensityMatrixBackend(Backend):
     """Runs a circuit as a density matrix, optionally with noise after each gate.
 
     Reached as ``Circuit.run(backend='density')``, or simply by passing
-    ``noise=`` to ``Circuit.run``, which routes here automatically.
+    ``noise=`` to any of ``Circuit``'s run entry points, which route here
+    automatically.
     """
+
+    #: What tells the caller that a plain run returns a density matrix rather
+    #: than a statevector, so that e.g. `Circuit.probs` reads the diagonal.
+    returns_density_matrix = True
 
     def run(self, gates: List[Operation], n_qubits: int, *args: Any, **kwargs: Any) -> Any:
         from ..noise import as_noise_model
@@ -158,6 +163,15 @@ class DensityMatrixBackend(Backend):
         if shots is None and returns != "shots":
             return rho
 
+        from .torch_backend import has_nonterminal_measurement
+        if has_nonterminal_measurement(gates, n_qubits):
+            # A measured qubit is used again, so the reported bit has to be the
+            # one the measurement actually produced. Averaging that away into the
+            # final diagonal -- which is what sampling at the end does -- reports
+            # whatever later gates left behind instead.
+            return self._sample_with_collapse(gates, n_qubits, model, quasi_static,
+                                              samples, shots, seed, initial, dtype,
+                                              device, bit_order)
         return self._sample(rho, gates, n_qubits, shots, seed, bit_order)
 
     def _quasi_static_average(self, gates: List[Operation], n_qubits: int, model: Any,
@@ -314,6 +328,69 @@ class DensityMatrixBackend(Backend):
         current = list(wires) + rest
         position = {axis: i for i, axis in enumerate(current)}
         return state.permute([position[w] for w in range(n_wires)])
+
+    def _sample_with_collapse(self, gates: List[Operation], n_qubits: int, model: Any,
+                              quasi_static: Any, samples: int, shots: Optional[int],
+                              seed: Optional[int], initial: Any, dtype: torch.dtype,
+                              device: torch.device, bit_order: str) -> 'typing.Counter[str]':
+        """Shot by shot, collapsing at each measurement and recording what it gave.
+
+        Quasi-static offsets are drawn per shot here as well, so a frozen
+        detuning still lasts exactly one repetition.
+        """
+        import random as _random
+
+        n_shots = shots if shots is not None else DEFAULT_SHOTS
+        rng = _random.Random(seed)
+        measured = sorted({q for g in gates if g.lowername == 'measure'
+                           for q in g.target_iter(n_qubits)})
+        report = measured if measured else list(range(n_qubits))
+        counts: 'typing.Counter[str]' = Counter()
+
+        for _ in range(n_shots):
+            ops = gates
+            if quasi_static is not None:
+                offsets = quasi_static.draw(n_qubits, rng)
+                ops = _interleave_layer_phases(gates, n_qubits, offsets, quasi_static.dt)
+            state = self._initial_state(initial, n_qubits, dtype, device)
+            results: Dict[int, int] = {}
+            for gate in ops:
+                if gate.lowername == 'measure':
+                    for q in gate.target_iter(n_qubits):
+                        results[q] = self._collapse(state, q, n_qubits, rng, dtype, device)
+                        state = self._last_collapsed
+                    continue
+                state = self._apply_operation(state, gate, n_qubits, model, dtype, device)
+            if not measured:
+                for q in report:
+                    results[q] = self._collapse(state, q, n_qubits, rng, dtype, device)
+                    state = self._last_collapsed
+            bits = ['0'] * n_qubits
+            for q in report:
+                bits[q] = str(results.get(q, 0))
+            counts[''.join(reversed(bits))] += 1
+        return apply_bit_order(counts, n_qubits, bit_order)
+
+    def _collapse(self, state: torch.Tensor, qubit: int, n_qubits: int, rng: Any,
+                  dtype: torch.dtype, device: torch.device) -> int:
+        """Measure `qubit` for real: draw an outcome from its marginal, then
+        project onto it and renormalize. The collapsed state is left in
+        ``_last_collapsed``."""
+        dim = 1 << n_qubits
+        rho = state.reshape(dim, dim)
+        diagonal = torch.diagonal(rho).real
+        index = torch.arange(dim, device=diagonal.device)
+        p_zero = float(diagonal[(index >> qubit) & 1 == 0].sum())
+        p_zero = min(max(p_zero, 0.0), 1.0)
+        outcome = 0 if rng.random() < p_zero else 1
+
+        projector = torch.zeros((2, 2), dtype=dtype, device=device)
+        projector[outcome, outcome] = 1.0
+        collapsed = self._apply(state, torch.kron(projector, projector.conj()),
+                                self._wires([qubit], n_qubits), n_qubits)
+        trace = torch.diagonal(collapsed.reshape(dim, dim)).sum().real
+        self._last_collapsed = collapsed / torch.clamp(trace, min=1e-300)
+        return outcome
 
     # ---------------------------------------------------------------- sampling
 

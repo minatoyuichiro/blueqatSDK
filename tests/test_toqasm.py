@@ -116,7 +116,45 @@ def test_barrier_qasm_roundtrip():
     assert tuple(c2.ops[1].target_iter(3)) == (0, 1, 2)
     assert np.allclose(c.run(), c2.run())
 
-def test_from_qasm_whole_register_barrier_is_skipped():
-    # "barrier q;" has no explicit indices; the parser drops it (documented).
-    c = from_qasm('h q[0]; barrier q; x q[0];')
+def test_from_qasm_applies_a_whole_register_barrier():
+    # "barrier q;" names the whole register. It used to be dropped, because the
+    # parser tracked no register widths; now the declaration supplies them.
+    c = from_qasm('qreg q[2]; h q[0]; barrier q; x q[0];')
+    assert [op.lowername for op in c.ops] == ['h', 'barrier', 'x']
+    assert set(c.ops[1].targets) == {0, 1}
+
+
+def test_from_qasm_without_a_qreg_declaration_still_parses_indexed_targets():
+    # No declaration to read a width from, so the width comes from the gates --
+    # the old behaviour, kept for fragments that omit the header.
+    c = from_qasm('h q[0]; x q[1];')
     assert [op.lowername for op in c.ops] == ['h', 'x']
+    assert c.n_qubits == 2
+
+
+def test_from_qasm_keeps_declared_but_idle_qubits():
+    assert from_qasm('qreg q[5]; creg c[5]; h q[0];').n_qubits == 5
+
+
+def test_from_qasm_round_trip_keeps_the_width():
+    original = Circuit(4).h[0].cx[0, 1]
+    assert from_qasm(original.to_qasm()).n_qubits == 4
+
+
+def test_from_qasm_applies_a_gate_to_a_whole_register():
+    c = from_qasm('qreg q[3]; h q;')
+    assert [op.lowername for op in c.ops] == ['h', 'h', 'h']
+    assert [op.targets for op in c.ops] == [0, 1, 2]
+
+
+def test_from_qasm_measures_a_whole_register():
+    c = from_qasm('qreg q[2]; creg c[2]; measure q -> c;')
+    assert [op.lowername for op in c.ops] == ['measure', 'measure']
+
+
+def test_from_qasm_rejects_an_unbounded_exponent():
+    # The angle parser avoids eval, but ** is unbounded arithmetic and this text
+    # can arrive from an MCP client; 9**9**9 never returns.
+    with pytest.raises(ValueError, match='Exponent'):
+        from_qasm('qreg q[1]; rx(9**9**9) q[0];')
+    assert from_qasm('qreg q[1]; rx(2**3) q[0];').ops[0].theta == 8

@@ -40,7 +40,7 @@ theta = J * t is what fixes the gate).
 """
 
 import math
-from typing import Any, Dict, List, Sequence, Union
+from typing import Any, Dict, List, Sequence, Tuple, Union
 
 from ..circuit import Circuit
 from ..gate import ExchangeGate
@@ -117,9 +117,11 @@ def to_schedule(source: Union[Circuit, Sequence[Pulse]],
 def from_schedule(schedule: Dict[str, Any]) -> Circuit:
     """Rebuild an exchange-pulse Circuit from a schedule dict.
 
-    Pulses are replayed in order of start time (ties broken by list order);
-    since only disjoint pairs ever overlap, this reproduces the original
-    unitary exactly."""
+    Pulses are replayed in order of start time (ties broken by list order).
+    That reproduces the original unitary exactly *because* overlapping pulses
+    only ever act on disjoint pairs, which is what `to_schedule` guarantees. A
+    hand-written schedule need not, so it is checked here rather than serialized
+    into a different unitary without comment."""
     if schedule.get("format") != SCHEDULE_FORMAT:
         raise ValueError("Not a blueqat-eo-schedule dict.")
     if schedule.get("version") not in (SCHEDULE_VERSION, ):
@@ -127,10 +129,32 @@ def from_schedule(schedule: Dict[str, Any]) -> Circuit:
     c = Circuit(int(schedule["n_spins"]))
     entries = sorted(enumerate(schedule["pulses"]),
                      key=lambda kv: (kv[1]["start"], kv[0]))
+    _check_disjoint_overlaps([p for _, p in entries])
     for _, p in entries:
         i, j = p["pair"]
         c.exch(float(p["theta"]))[int(i), int(j)]
     return c
+
+
+def _check_disjoint_overlaps(pulses: List[Dict[str, Any]]) -> None:
+    """Refuse a schedule where two pulses overlap in time and share a spin.
+
+    Replaying such a schedule serially is not the same operator: exchange on
+    overlapping pairs does not commute.
+    """
+    active: List[Tuple[float, float, Tuple[int, int]]] = []
+    for p in pulses:
+        start = float(p["start"])
+        end = start + float(p.get("duration", 0.0))
+        pair = (int(p["pair"][0]), int(p["pair"][1]))
+        for other_start, other_end, other_pair in active:
+            overlapping = start < other_end - 1e-12 and other_start < end - 1e-12
+            if overlapping and set(pair) & set(other_pair):
+                raise ValueError(
+                    f"Pulses on {other_pair} and {pair} overlap in time and share a "
+                    f"spin. Exchange on overlapping pairs does not commute, so this "
+                    f"schedule cannot be replayed as a sequence.")
+        active.append((start, end, pair))
 
 
 def schedule_stats(schedule: Dict[str, Any]) -> Dict[str, float]:

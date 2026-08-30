@@ -95,16 +95,25 @@ class TwoQubitGateDecomposingTranspiler(Backend):
                             Mat1Gate((t2, ), singlemats[t2]))
                     singlemats[t2] = r2.copy()
                     operations.append(basisgate((t1, t2), *gparams))
-            else:
+            elif isinstance(gate, IFallbackOperation):
                 TwoQubitGateDecomposingTranspiler._run_inner(
                     gate.fallback(n_qubits), operations, singlemats, n_qubits,
                     basis, mat1_decomposer)
+            else:
+                # Most two-qubit gates are not IFallbackOperation, so reaching
+                # for .fallback() raised a bare AttributeError on swap, cy, ch
+                # and every parametric two-qubit gate. Say what actually happened.
+                raise ValueError(
+                    f"Cannot decompose {gate.lowername!r} into basis {basis!r}: it is "
+                    f"neither a basis gate, nor in the decomposition table "
+                    f"({', '.join(sorted(DECOMPOSE_TABLE))}), nor does it define a "
+                    f"fallback. Pick a basis it can reach, or decompose it first.")
 
     @staticmethod
     def run(gates: List[Operation],
             n_qubits: int,
             *,
-            basis: Union[str, Sequence[str]],
+            basis: Union[str, Sequence[str]] = 'cx',
             mat1_decomposer: Optional[Callable[[OneQubitGate],
                                                List[Operation]]] = None,
             **kwargs) -> Circuit:

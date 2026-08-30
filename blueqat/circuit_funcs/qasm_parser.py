@@ -20,7 +20,7 @@ import ast
 import math
 import operator
 import re
-from typing import List
+from typing import Dict, List, Optional, Tuple
 
 from ..circuit import Circuit
 
@@ -50,8 +50,22 @@ _GATES = {
 }
 
 _CONSTS = {'pi': math.pi}
+#: Largest exponent an angle expression may use. `**` is unbounded arithmetic:
+#: `9**9**9` has no answer a machine will finish computing, and this parser reads
+#: text arriving from MCP clients, so an angle is not a place to allow that.
+MAX_EXPONENT = 64
+
+
+def _bounded_pow(base: float, exponent: float) -> float:
+    if abs(exponent) > MAX_EXPONENT:
+        raise ValueError(
+            f"Exponent {exponent} exceeds the limit of {MAX_EXPONENT} allowed in a "
+            f"QASM angle expression.")
+    return operator.pow(base, exponent)
+
+
 _BINOPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
-           ast.Div: operator.truediv, ast.Pow: operator.pow}
+           ast.Div: operator.truediv, ast.Pow: _bounded_pow}
 _UNARYOPS = {ast.USub: operator.neg, ast.UAdd: operator.pos}
 
 
@@ -82,16 +96,73 @@ def _parse_args(args_str: str) -> List[float]:
     return args
 
 
-def _parse_targets(targets_str: str) -> List[int]:
-    return [int(m.group(1)) for m in re.finditer(r'\[(\d+)\]', targets_str)]
+def _arity(gate_name: str) -> int:
+    """How many qubits one application of this gate takes."""
+    from ..gate import OneQubitGate, TwoQubitGate
+    from ..gateset import get_op_type
+    op_type = get_op_type(gate_name)
+    if op_type is None or issubclass(op_type, OneQubitGate):
+        return 1
+    if issubclass(op_type, TwoQubitGate):
+        return 2
+    return 3
+
+
+def _parse_registers(text: str) -> Tuple[Dict[str, Tuple[int, int]], int]:
+    """Declared quantum registers as ``name -> (offset, size)``, and the total width.
+
+    Registers are laid out consecutively in blueqat's single qubit space, in
+    declaration order.
+    """
+    registers: Dict[str, Tuple[int, int]] = {}
+    offset = 0
+    for name, size in re.findall(r'\bqreg\s+(\w+)\s*\[\s*(\d+)\s*\]', text):
+        size = int(size)
+        registers[name] = (offset, size)
+        offset += size
+    return registers, offset
+
+
+def _parse_targets(targets_str: str,
+                   registers: Optional[Dict[str, Tuple[int, int]]] = None) -> List[int]:
+    """Qubit indices named by a target list.
+
+    ``q[2]`` names one qubit; a bare ``q`` names the whole register, which is
+    ordinary OpenQASM and used to parse as an empty target list -- so the gate
+    was appended and did nothing, with no error.
+    """
+    registers = registers or {}
+    targets: List[int] = []
+    for piece in targets_str.split(','):
+        piece = piece.strip()
+        if not piece:
+            continue
+        indexed = re.fullmatch(r'(\w+)\s*\[\s*(\d+)\s*\]', piece)
+        if indexed:
+            name, index = indexed.group(1), int(indexed.group(2))
+            offset = registers.get(name, (0, 0))[0] if registers else 0
+            targets.append(offset + index)
+            continue
+        whole = re.fullmatch(r'\w+', piece)
+        if whole and whole.group(0) in registers:
+            offset, size = registers[whole.group(0)]
+            targets.extend(range(offset, offset + size))
+            continue
+        raise ValueError(f"Could not parse QASM target {piece!r}.")
+    return targets
 
 
 def from_qasm(qasm: str) -> Circuit:
     """Parse an OpenQASM 2.0 program (the qelib1.inc gate set) into a Circuit."""
-    c = Circuit()
     # strip line (//) and block (/* */) comments
     text = re.sub(r'/\*.*?\*/', '', qasm, flags=re.DOTALL)
     text = re.sub(r'//.*', '', text)
+
+    # The declared width is the circuit's width. Inferring it from the gates
+    # instead loses every qubit that was declared but left idle, and shrinks a
+    # circuit on a to_qasm/from_qasm round trip.
+    registers, width = _parse_registers(text)
+    c = Circuit(width)
 
     for raw_stmt in text.split(';'):
         stmt = raw_stmt.strip()
@@ -102,16 +173,16 @@ def from_qasm(qasm: str) -> Circuit:
 
         barrier_match = re.match(r'barrier\s+(.+)$', stmt)
         if barrier_match:
-            targets = _parse_targets(barrier_match.group(1))
+            targets = _parse_targets(barrier_match.group(1), registers)
             if targets:
                 c.barrier[tuple(targets) if len(targets) > 1 else targets[0]]
-            # "barrier q;" (whole register, no explicit indices) is dropped:
-            # the register size isn't tracked here.
             continue
 
-        measure_match = re.match(r'measure\s+q\[(\d+)\]\s*->\s*c\[(\d+)\]$', stmt)
+        measure_match = re.match(r'measure\s+(.+?)\s*->\s*(.+)$', stmt)
         if measure_match:
-            c.m[int(measure_match.group(1))]
+            targets = _parse_targets(measure_match.group(1), registers)
+            for target in targets:
+                c.m[target]
             continue
 
         gate_match = re.match(r'(\w+)\s*(?:\(([^)]*)\))?\s+(.+)$', stmt)
@@ -125,12 +196,18 @@ def from_qasm(qasm: str) -> Circuit:
         args = _parse_args(args_str) if args_str else []
         if len(args) != n_args:
             raise ValueError(f"Gate {name!r} expects {n_args} argument(s), got {len(args)}")
-        targets = _parse_targets(targets_str)
+        targets = _parse_targets(targets_str, registers)
+        if not targets:
+            raise ValueError(f"Gate {name!r} names no qubits: {stmt!r}")
 
         op = getattr(c, gate_name)
         if args:
             op = op(*args)
-        target = targets[0] if len(targets) == 1 else tuple(targets)
-        op[target]
+        if _arity(gate_name) == 1 and len(targets) > 1:
+            # "h q;" over a whole register is one gate per qubit.
+            for target in targets:
+                op[target]
+        else:
+            op[targets[0] if len(targets) == 1 else tuple(targets)]
 
     return c

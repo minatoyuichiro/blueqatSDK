@@ -37,6 +37,7 @@ import random
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from blueqat import Circuit
+from blueqat.gate import TwoQubitGate
 
 __all__ = ['Clifford', 'random_clifford']
 
@@ -55,6 +56,19 @@ _CLIFFORD_REWRITES: Dict[str, Any] = {
     'cz': lambda q: [('h', (q[1],)), ('cx', q), ('h', (q[1],))],
     'cy': lambda q: [('s', (q[1],))] * 3 + [('cx', q), ('s', (q[1],))],
     'swap': lambda q: [('cx', q), ('cx', (q[1], q[0])), ('cx', q)],
+    # zz = diag(1, i, i, 1) = (S (x) S) . CZ, and iswap = swap . CZ . (S (x) S).
+    # All four are Clifford; leaving them out of this table meant the stabilizer
+    # backend refused them with a message that was simply untrue.
+    'zz': lambda q: [('s', (q[0],)), ('s', (q[1],)),
+                     ('h', (q[1],)), ('cx', q), ('h', (q[1],))],
+    'zzdg': lambda q: [('h', (q[1],)), ('cx', q), ('h', (q[1],))]
+                      + [('s', (q[0],))] * 3 + [('s', (q[1],))] * 3,
+    'iswap': lambda q: [('s', (q[0],)), ('s', (q[1],)),
+                        ('h', (q[0],)), ('cx', q), ('cx', (q[1], q[0])),
+                        ('h', (q[1],))],
+    'iswapdg': lambda q: [('h', (q[1],)), ('cx', (q[1], q[0])), ('cx', q),
+                          ('h', (q[0],))]
+                         + [('s', (q[0],))] * 3 + [('s', (q[1],))] * 3,
 }
 
 
@@ -351,7 +365,10 @@ def _primitive_ops(circuit: Circuit, n: int) -> List[Tuple[str, Tuple[int, ...]]
                 out.append(('cx', (c, t)))
         elif name in _CLIFFORD_REWRITES:
             rewrite = _CLIFFORD_REWRITES[name]
-            if name in ('cz', 'cy', 'swap', 'cnot'):
+            # Which qubits one application takes is the gate's own property; a
+            # hardcoded list of two-qubit names silently handed single-element
+            # tuples to any rewrite added later.
+            if isinstance(gate, TwoQubitGate):
                 pairs = list(gate.control_target_iter(n))
             else:
                 pairs = [(t,) for t in gate.target_iter(n)]

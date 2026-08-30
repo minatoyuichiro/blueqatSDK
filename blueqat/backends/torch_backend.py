@@ -46,6 +46,42 @@ def _make_generator(seed: Optional[int], device: Any = "cpu") -> Optional[torch.
     return generator
 
 
+def _touched_qubits(gate: Operation, n_qubits: int) -> set:
+    """Every qubit an operation acts on, control qubits included."""
+    from ..gate import TwoQubitGate
+    if isinstance(gate, TwoQubitGate):
+        touched: set = set()
+        for control, target in gate.control_target_iter(n_qubits):
+            touched.update((control, target))
+        return touched
+    return set(gate.target_iter(n_qubits))
+
+
+def has_nonterminal_measurement(gates: List[Operation], n_qubits: int) -> bool:
+    """Whether any measured qubit is used again afterwards.
+
+    A measurement collapses the state, so anything acting on that qubit
+    afterwards -- as a target *or* as a control -- sees a classical bit rather
+    than a superposition. Sampling once from the final state cannot reproduce
+    that: it keeps the qubit coherent through the rest of the circuit and then
+    reports a value drawn at the end, which is a different experiment.
+
+    Measurements that nothing follows are exempt, which is the common case and
+    the one the fast path exists for.
+    """
+    measured: set = set()
+    for gate in gates:
+        name = gate.lowername
+        if name == 'measure':
+            measured.update(gate.target_iter(n_qubits))
+            continue
+        if name == 'barrier' or not measured:
+            continue
+        if measured & _touched_qubits(gate, n_qubits):
+            return True
+    return False
+
+
 def _collect_measured_qubits(gates: List[Operation], n_qubits: int) -> Optional[set]:
     """Qubit indices covered by any `measure`/`.m[...]` gate in the circuit, or None if
     the circuit has no explicit measurement at all (meaning: report every qubit, the
@@ -565,10 +601,16 @@ class TorchBackend(Backend):
         #    測定した"その時点での"値をキー別に記録する必要があるため同様。
         #    returns="statevector_and_shots" は測定でcollapseした後の状態を測定結果と
         #    対応させて返す必要があるため、同じくその場でのcollapseが要る。
+        #    そして測定した量子ビットを後で使う回路も同様である。高速パスはその
+        #    量子ビットを最後までコヒーレントに保ってしまい、別の実験を測ることになる
+        #    （キーの有無だけで分布が変わってしまっていた）。
         #    これらを含む回路、または returns="samples"/"statevector_and_shots" の要求は、
         #    ショットごとに最初から再実行し、measure/reset の都度その場でcollapseする。
-        needs_collapse = returns in ("samples", "statevector_and_shots") or any(
-            g.lowername == 'reset' or (g.lowername == 'measure' and g.key is not None) for g in gates)
+        needs_collapse = (
+            returns in ("samples", "statevector_and_shots")
+            or any(g.lowername == 'reset'
+                   or (g.lowername == 'measure' and g.key is not None) for g in gates)
+            or has_nonterminal_measurement(gates, n_qubits))
         if needs_collapse:
             result = self._run_with_collapse(gates, n_qubits, run_mode, device, target_dtype, initial,
                                              shots, returns, _make_generator(seed))
@@ -615,7 +657,10 @@ class TorchBackend(Backend):
             # 0量子ビットのHilbert空間は自明 (振幅1のスカラー) なので縮約は不要
             flattened_state = torch.tensor([1.0 + 0.0j], dtype=target_dtype, device=device)
         else:
-            if n_qubits > 28 and shots is None:
+            # The full vector is impossible above 28 qubits whatever else was
+            # asked for. Only sampling can proceed; a caller that explicitly
+            # wants the statevector gets the error rather than a Counter.
+            if n_qubits > 28 and (shots is None or returns == "statevector"):
                 raise MemoryError(f"量子ビット数({n_qubits})が大きすぎるため、全状態ベクトルを展開できません。マクロな回路では returns='amplitude' または shots を指定してください。")
             
             if n_qubits <= 28:
@@ -649,7 +694,11 @@ class TorchBackend(Backend):
                 from ..utils import pauli_expectation
                 return pauli_expectation(hamiltonian, flattened_state, n_qubits)
 
-            if returns == "statevector" or shots is None:
+            # `shots is None` alone used to return here, which made
+            # returns='shots' hand back a statevector and left the DEFAULT_SHOTS
+            # fallback below unreachable -- so the return type depended on the
+            # backend and on whether the circuit happened to need collapsing.
+            if returns == "statevector" or (shots is None and returns != "shots"):
                 return flattened_state
 
         # ==================================================

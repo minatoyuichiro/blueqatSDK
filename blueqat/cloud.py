@@ -43,6 +43,7 @@ import os
 import stat
 import urllib.error
 import urllib.request
+import warnings
 from collections import Counter as _Counter
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -88,11 +89,34 @@ def save_api_key(api_key: str, endpoint: Optional[str] = None) -> Path:
     data["api_key"] = api_key
     if endpoint is not None:
         data["endpoint"] = endpoint
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2)
-    # API keys are secrets: restrict the file to its owner.
-    os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+    _write_private(path, data)
     return path
+
+
+def _write_private(path: 'Path', data: Dict[str, Any]) -> None:
+    """Write the config so that only its owner can ever read it.
+
+    Creating the file with 0o600 rather than chmod-ing afterwards closes the
+    window in which it exists at whatever the umask allows. On Windows
+    ``os.chmod`` only touches the read-only bit and cannot make a file
+    owner-only at all, so the key is written to a directory locked down instead,
+    and a warning says so rather than leaving a false sense of protection.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    descriptor = os.open(path, flags, stat.S_IRUSR | stat.S_IWUSR)
+    with os.fdopen(descriptor, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2)
+    if os.name == 'nt':
+        try:
+            os.chmod(path.parent, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+        except OSError:
+            pass
+        warnings.warn(
+            f"{path} holds an API key, but Windows cannot restrict a file to its "
+            f"owner through os.chmod. Check the file's ACL if this machine has "
+            f"other users.", stacklevel=3)
+    else:
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
 
 
 def delete_api_key() -> None:
@@ -101,9 +125,7 @@ def delete_api_key() -> None:
     data = _load_config_file()
     if "api_key" in data:
         del data["api_key"]
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2)
-        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+        _write_private(path, data)
 
 
 def get_api_key() -> Optional[str]:
@@ -231,7 +253,18 @@ def hamiltonian_to_terms(hamiltonian) -> Tuple[List[dict], float]:
     constant = 0.0
     for term in expr:
         coeff = term.coeff
-        coeff = float(coeff.real) if isinstance(coeff, complex) else float(coeff)
+        if isinstance(coeff, complex):
+            # A Hamiltonian is Hermitian, so a Pauli term with an imaginary
+            # coefficient is not one. Dropping the imaginary part quietly sends a
+            # different operator than the caller wrote.
+            if abs(coeff.imag) > 1e-12:
+                raise ValueError(
+                    f"Term {term!r} has a complex coefficient ({coeff}); a "
+                    f"Hamiltonian must be Hermitian. Check for a missing "
+                    f"conjugate, or use .simplify() on the expression.")
+            coeff = float(coeff.real)
+        else:
+            coeff = float(coeff)
         if not term.ops:
             constant += coeff
             continue
