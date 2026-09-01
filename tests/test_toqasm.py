@@ -158,3 +158,65 @@ def test_from_qasm_rejects_an_unbounded_exponent():
     with pytest.raises(ValueError, match='Exponent'):
         from_qasm('qreg q[1]; rx(9**9**9) q[0];')
     assert from_qasm('qreg q[1]; rx(2**3) q[0];').ops[0].theta == 8
+
+
+# ------------------------------- measuring a qubit more than once
+
+def test_reused_qubit_measurements_get_separate_classical_bits():
+    """A qubit measured twice must not overwrite its own earlier result.
+
+    Every measurement used to be written to c[qubit], so a circuit that reuses a
+    qubit -- measure, reset, use again, measure -- lost the first value on a real
+    device. That is exactly what a mid-circuit-measurement circuit is measured
+    for, so the bits are now distinct.
+    """
+    c = Circuit(2).h[0].cx[0, 1]
+    c.m(key='a')[1].reset[1]
+    c.cx[0, 1]
+    c.m(key='b')[1]
+    lines = [l for l in c.to_qasm().splitlines() if l.startswith('measure')]
+    assert lines[0].startswith('measure q[1] -> c[1];')
+    assert lines[1].startswith('measure q[1] -> c[2];')
+    assert 'key "a"' in lines[0] and 'key "b"' in lines[1]
+
+
+def test_the_creg_widens_to_fit_every_measurement():
+    c = Circuit(1)
+    for _ in range(4):
+        c.m[0].reset[0]
+    qasm = c.to_qasm()
+    assert 'creg c[4];' in qasm
+    targets = [l.split('-> ')[1].split(';')[0] for l in qasm.splitlines()
+               if l.startswith('measure')]
+    assert targets == ['c[0]', 'c[1]', 'c[2]', 'c[3]']
+
+
+def test_measuring_each_qubit_once_is_byte_for_byte_unchanged():
+    # The compatibility promise: circuits that do not reuse a qubit emit exactly
+    # what they always did, comments included (there are none).
+    assert Circuit(2).h[0].cx[0, 1].m[:].to_qasm() == (
+        'OPENQASM 2.0;\n'
+        'include "qelib1.inc";\n'
+        'qreg q[2];\n'
+        'creg c[2];\n'
+        'h q[0];\n'
+        'cx q[0],q[1];\n'
+        'measure q[0] -> c[0];\n'
+        'measure q[1] -> c[1];')
+
+
+def test_a_single_keyed_measurement_still_uses_its_own_qubit_index():
+    lines = [l for l in Circuit(2).m(key='a')[0].to_qasm().splitlines()
+             if l.startswith('measure')]
+    assert lines[0].startswith('measure q[0] -> c[0];')
+
+
+def test_qasm_with_reused_qubits_parses_back():
+    c = Circuit(2).h[0].cx[0, 1]
+    c.m(key='a')[1].reset[1]
+    c.cx[0, 1]
+    c.m(key='b')[1]
+    back = from_qasm(c.to_qasm())
+    assert [op.lowername for op in back.ops] == [
+        'h', 'cx', 'measure', 'reset', 'cx', 'measure']
+    assert back.n_qubits == 2

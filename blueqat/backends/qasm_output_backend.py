@@ -12,8 +12,47 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections import deque
+
 from ..gate import *
 from .backendbase import Backend
+
+
+def _assign_classical_bits(gates, n_qubits):
+    """Which classical bit each measurement writes to, and how wide `creg` must be.
+
+    The first measurement of a qubit keeps ``c[qubit]``, so a circuit that
+    measures each qubit at most once emits exactly the QASM it always did. A
+    later measurement of the same qubit takes a fresh bit past the quantum
+    register's width instead: writing it to ``c[qubit]`` again would overwrite
+    the earlier result, which is precisely what a circuit that reuses a qubit
+    measured it for.
+
+    Returns the per-measurement assignments in the order they will be emitted,
+    each with a note naming the measurement's key when it has one, since
+    OpenQASM 2.0 has nowhere else to put it.
+    """
+    assignments = []
+    used_bits = set()
+    next_free = n_qubits
+    for gate in gates:
+        if gate.lowername != 'measure':
+            continue
+        key = getattr(gate, 'key', None)
+        for qubit in gate.target_iter(n_qubits):
+            if qubit not in used_bits:
+                bit = qubit
+            else:
+                bit = next_free
+                next_free += 1
+            used_bits.add(bit)
+            note = ''
+            if bit != qubit or key is not None:
+                note = f'q[{qubit}]'
+                if key is not None:
+                    note += f' key "{key}"'
+            assignments.append((bit, note))
+    return assignments, max(n_qubits, next_free)
 
 
 class QasmOutputBackend(Backend):
@@ -23,16 +62,17 @@ class QasmOutputBackend(Backend):
             return {'output_prologue': output_prologue}
 
         args = _parse_run_args(*args, **kwargs)
+        assignments, creg_width = _assign_classical_bits(gates, n_qubits)
         if args['output_prologue']:
             qasmlist = [
                 "OPENQASM 2.0;",
                 'include "qelib1.inc";',
                 f"qreg q[{n_qubits}];",
-                f"creg c[{n_qubits}];",
+                f"creg c[{creg_width}];",
             ]
         else:
             qasmlist = []
-        return gates, (qasmlist, n_qubits)
+        return gates, (qasmlist, n_qubits, deque(assignments))
 
     def _postprocess_run(self, ctx):
         return "\n".join(ctx[0])
@@ -140,7 +180,9 @@ class QasmOutputBackend(Backend):
 
     def gate_measure(self, gate, ctx):
         for idx in gate.target_iter(ctx[1]):
-            ctx[0].append(f"measure q[{idx}] -> c[{idx}];")
+            bit, note = ctx[2].popleft()
+            comment = f"  // {note}" if note else ""
+            ctx[0].append(f"measure q[{idx}] -> c[{bit}];{comment}")
         return ctx
 
     gate_reset = _one_qubit_gate_noargs
