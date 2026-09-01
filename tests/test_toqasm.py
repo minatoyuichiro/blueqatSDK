@@ -220,3 +220,33 @@ def test_qasm_with_reused_qubits_parses_back():
     assert [op.lowername for op in back.ops] == [
         'h', 'cx', 'measure', 'reset', 'cx', 'measure']
     assert back.n_qubits == 2
+
+
+def test_a_transpiled_qiskit_style_program_imports_and_runs():
+    """The documented Qiskit route, on a real circuit.
+
+    A u/cx program of the shape `transpile(basis_gates=["u", "cx"])` produces,
+    with a creg narrower than the qreg and measurements on a subset of qubits --
+    the combination that used to lose the declared width.
+    """
+    qasm = """OPENQASM 2.0;
+include "qelib1.inc";
+qreg q[4];
+creg c[3];
+u(2.808,-pi,-pi) q[0];
+u(2.454,pi/2,0) q[1];
+cx q[0],q[1];
+u(0.681,-pi/2,pi/2) q[0];
+cx q[0],q[2];
+u(0.421,-pi,-pi/2) q[3];
+cx q[0],q[3];
+measure q[1] -> c[0];
+measure q[2] -> c[1];
+measure q[3] -> c[2];"""
+    c = from_qasm(qasm)
+    assert c.n_qubits == 4
+    assert sum(1 for op in c.ops if op.lowername == 'cx') == 3
+    counts = c.run(shots=500, seed=1)
+    assert sum(counts.values()) == 500
+    # Only the measured qubits are reported; qubit 0 stays '0'.
+    assert all(key[-1] == '0' for key in counts)

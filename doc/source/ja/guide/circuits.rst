@@ -113,6 +113,27 @@ OpenQASM 2.0
    from blueqat.circuit_funcs import from_qasm
    c = from_qasm(qasm)
 
+Qiskitから回路を持ち込む
+------------------------
+
+blueqat は任意の1量子ビット行列（ ``mat1`` ）は合成できますが、任意の2量子ビット
+ユニタリや等長写像は合成できません。それらは\ **他のツールチェーンに分解させて
+QASM で取り込む**\ のが現実的な経路です:
+
+.. code-block:: python
+
+   # Qiskit 側で、パーサが読める基底へ transpile してから出力する
+   #   qc = transpile(circuit, basis_gates=["u", "cx"])
+   #   text = qasm2.dumps(qc)
+
+   from blueqat.circuit_funcs.qasm_parser import from_qasm
+   c = from_qasm(text)
+   c.run(shots=200000, seed=1)
+
+``u`` ・ ``cx`` ・ ``reset`` ・ ``barrier`` ・ ``measure`` はいずれもそのまま
+通ります。ただし\ **測定のキーは失われます**\ （OpenQASM 2.0 に置き場所が
+ありません）。結果に名前が要る場合は blueqat 側で ``m(key=...)`` を足してください。
+
 JSONシリアライズ
 ----------------
 

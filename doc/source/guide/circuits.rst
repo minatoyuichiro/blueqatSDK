@@ -115,6 +115,27 @@ OpenQASM 2.0
    from blueqat.circuit_funcs import from_qasm
    c = from_qasm(qasm)
 
+Bringing a circuit in from Qiskit
+---------------------------------
+
+blueqat synthesizes arbitrary single-qubit matrices (``mat1``) but not
+arbitrary two-qubit unitaries or isometries. The practical route for those is
+to let another toolchain do the decomposition and import the result as QASM:
+
+.. code-block:: python
+
+   # In Qiskit: transpile to a basis blueqat's parser reads, then dump.
+   #   qc = transpile(circuit, basis_gates=["u", "cx"])
+   #   text = qasm2.dumps(qc)
+
+   from blueqat.circuit_funcs.qasm_parser import from_qasm
+   c = from_qasm(text)
+   c.run(shots=200000, seed=1)
+
+``u``, ``cx``, ``reset``, ``barrier`` and ``measure`` all survive the trip.
+Measurement *keys* do not -- OpenQASM 2.0 has nowhere to record them -- so add
+``m(key=...)`` on the blueqat side if the results need naming.
+
 JSON serialization
 ------------------
 
