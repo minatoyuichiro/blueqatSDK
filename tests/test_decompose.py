@@ -20,7 +20,9 @@ import torch
 
 from blueqat import Circuit
 from blueqat.circuit_funcs.circuit_to_unitary import circuit_to_unitary
-from blueqat.decompose import decompose_two_qubit, two_qubit_kak
+from blueqat.decompose import (complete_to_unitary, decompose_isometry,
+                               decompose_two_qubit, decompose_unitary,
+                               synthesize_two_qubit, two_qubit_kak)
 from blueqat.utils import random_unitary
 
 _C = torch.complex128
@@ -145,3 +147,105 @@ def test_kak_local_parts_are_really_local():
         left, _, right, _ = two_qubit_kak(random_unitary(4, seed=seed))
         for part in (left, right):
             assert _tensor_factors(part)[2] < 1e-8
+
+
+# ------------------------------------------------- three-CX synthesis
+
+def test_synthesis_reaches_three_cx():
+    for seed in range(8):
+        matrix = random_unitary(4, seed=seed)
+        circuit = synthesize_two_qubit(matrix)
+        assert sum(1 for op in circuit.ops if op.lowername == 'cx') == 3
+        assert _equal_up_to_phase(matrix, _unitary(circuit), atol=1e-6)
+
+
+def test_synthesis_refuses_when_it_cannot_reach_the_budget():
+    # One CX cannot express a general two-qubit unitary, and saying so beats
+    # returning the closest thing it found.
+    with pytest.raises(RuntimeError, match='could not fit'):
+        synthesize_two_qubit(random_unitary(4, seed=0), n_cx=1)
+
+
+def test_synthesis_validates_its_arguments():
+    with pytest.raises(ValueError):
+        synthesize_two_qubit(random_unitary(4, seed=0), n_cx=4)
+    with pytest.raises(ValueError):
+        synthesize_two_qubit(torch.eye(2, dtype=_C))
+
+
+# ------------------------------------------------ any number of qubits
+
+@pytest.mark.parametrize('n', [1, 2, 3, 4])
+def test_arbitrary_unitaries_decompose(n):
+    for seed in range(4):
+        matrix = random_unitary(1 << n, seed=seed + 10 * n)
+        assert _equal_up_to_phase(matrix, _unitary(decompose_unitary(matrix)))
+
+
+@pytest.mark.parametrize('build', [
+    lambda: Circuit(3).ccx[0, 1, 2],
+    lambda: Circuit(3).cswap[0, 1, 2],
+    lambda: Circuit(3).cx[0, 1],
+    lambda: Circuit(3).h[0].h[1].h[2],
+])
+def test_structured_unitaries_decompose(build):
+    # These are where a naive cosine-sine construction fails: repeated cosines.
+    matrix = _unitary(build())
+    assert _equal_up_to_phase(matrix, _unitary(decompose_unitary(matrix)))
+
+
+def test_the_identity_decomposes_without_entanglement():
+    circuit = decompose_unitary(torch.eye(8, dtype=_C))
+    assert _equal_up_to_phase(torch.eye(8, dtype=_C), _unitary(circuit))
+
+
+def test_cosine_sine_reconstructs():
+    from blueqat.decompose import cosine_sine
+    for size in (2, 4, 8):
+        matrix = random_unitary(size, seed=size)
+        top, bottom, cosines, sines, right_top, right_bottom = cosine_sine(matrix)
+        half = size // 2
+        middle = torch.zeros((size, size), dtype=_C)
+        middle[:half, :half] = torch.diag(cosines.to(_C))
+        middle[:half, half:] = -torch.diag(sines.to(_C))
+        middle[half:, :half] = torch.diag(sines.to(_C))
+        middle[half:, half:] = torch.diag(cosines.to(_C))
+        left = torch.block_diag(top, bottom)
+        right = torch.block_diag(right_top, right_bottom)
+        assert torch.allclose(left @ middle @ right.conj().T, matrix, atol=1e-9)
+
+
+# ------------------------------------------------------------ isometries
+
+@pytest.mark.parametrize('n,k', [(2, 1), (3, 1), (3, 2), (4, 2)])
+def test_isometries_act_correctly_on_padded_inputs(n, k):
+    """The shape a sequential MPS circuit is made of.
+
+    The circuit reproduces the isometry when the qubits above the input
+    register start in |0>, which is what the padding means.
+    """
+    source = random_unitary(1 << n, seed=n * 10 + k)
+    isometry = source[:, :1 << k]
+    circuit = decompose_isometry(isometry)
+    for column in range(1 << k):
+        start = torch.zeros(1 << n, dtype=_C)
+        start[column] = 1.0
+        out = circuit.run(initial=start, mode='statevector')
+        expected = isometry[:, column]
+        index = int(torch.argmax(expected.abs()))
+        phase = out[index] / expected[index]
+        assert torch.allclose(expected * phase, out, atol=1e-7)
+
+
+def test_completion_keeps_the_original_columns():
+    source = random_unitary(8, seed=2)
+    isometry = source[:, :2]
+    completed = complete_to_unitary(isometry)
+    assert torch.allclose(completed[:, :2], isometry, atol=1e-12)
+    assert torch.allclose(completed.conj().T @ completed,
+                          torch.eye(8, dtype=_C), atol=1e-9)
+
+
+def test_a_non_isometry_is_refused():
+    with pytest.raises(ValueError, match='isometry'):
+        complete_to_unitary(torch.full((8, 2), 0.5, dtype=_C))

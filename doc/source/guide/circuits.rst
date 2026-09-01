@@ -138,17 +138,55 @@ out, so structured gates cost less without being special-cased: ``cx``, ``cz``,
 ``cy`` and ``ch`` each come back as one rotation, ``iswap`` as two, ``swap`` as
 three.
 
+Six CX is not the optimal three, and on hardware -- where a CX budget of around
+fifteen decides whether a result survives -- that difference matters.
+:func:`~blueqat.decompose.synthesize_two_qubit` reaches three by fitting a
+three-CX circuit to the target with gradient descent instead of solving for it:
+
+.. code-block:: python
+
+   from blueqat.decompose import synthesize_two_qubit
+
+   synthesize_two_qubit(matrix)              # exactly three CX
+
+The fit is checked, not assumed: it must reach an infidelity below ``tol`` or
+the call raises. Prefer the closed form when exactness matters more than the
+gate count, and this when the circuit is bound for a device.
+
+Larger unitaries and isometries
+-------------------------------
+
+:func:`~blueqat.decompose.decompose_unitary` handles any ``2**n x 2**n``
+unitary by the Quantum Shannon decomposition, and
+:func:`~blueqat.decompose.decompose_isometry` a ``2**n x 2**k`` isometry:
+
+.. code-block:: python
+
+   from blueqat.decompose import decompose_unitary, decompose_isometry
+
+   decompose_unitary(matrix)                 # n qubits
+   decompose_isometry(v)                     # k input qubits, padded to n
+
+An isometry's circuit reproduces it **when the qubits above the input register
+start in** ``|0>``. That is the shape a matrix product state takes when written
+as a sequential circuit, where each site's tensor maps the bond to the bond
+plus the new site.
+
+Cost grows as ``4**n``: 3 CX at two qubits, 24 two-qubit gates at three, 120 at
+four. These are correct constructions, not optimized ones -- for a circuit
+headed to hardware, count the gates before assuming it fits.
+
 .. note::
 
-   Six CX is not the optimal three. Reaching that needs the canonical angles
-   folded into the Weyl chamber with matching local corrections, which is not
-   implemented. On hardware, where a CX budget of around fifteen is what
-   decides whether a result survives, the difference is worth knowing before
-   building a circuit out of many general two-qubit blocks.
+   SciPy is used for the cosine-sine decomposition when it is installed, and
+   only then are degenerate cases handled exactly. They are not exotic: a
+   Toffoli gate and the unitary completion of an isometry both have repeated
+   cosines. Without SciPy the built-in fallback covers matrices whose cosines
+   are distinct and raises on the rest, rather than returning factors that are
+   quietly not unitary.
 
-Anything larger -- a general n-qubit unitary, or an isometry -- has no
-synthesizer here. Let another toolchain decompose it and import the result as
-QASM:
+To go through another toolchain instead -- for a decomposition tuned harder
+than these -- import its output as QASM:
 
 .. code-block:: python
 
