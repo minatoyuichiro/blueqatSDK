@@ -250,3 +250,46 @@ measure q[3] -> c[2];"""
     assert sum(counts.values()) == 500
     # Only the measured qubits are reported; qubit 0 stays '0'.
     assert all(key[-1] == '0' for key in counts)
+
+
+def test_measurements_sharing_a_key_share_a_classical_bit():
+    """The key names a result, so it names a classical bit too.
+
+    Exporting used to ignore the key entirely, which meant m(key="a") meant one
+    thing when the circuit was simulated and another when it was written out.
+    """
+    c = Circuit(1)
+    c.m(key='a')[0].reset[0].x[0]
+    c.m(key='a')[0].reset[0].h[0]
+    c.m(key='b')[0]
+    targets = [l.split('-> ')[1].split(';')[0] for l in c.to_qasm().splitlines()
+               if l.startswith('measure')]
+    assert targets == ['c[0]', 'c[0]', 'c[1]']
+
+
+def test_appended_duplicates_each_get_their_own_bit():
+    # duplicated="append" collects a list of separate results, so they are not
+    # one slot written twice.
+    c = Circuit(1)
+    c.m(key='a', duplicated='append')[0].reset[0]
+    c.m(key='a', duplicated='append')[0]
+    targets = [l.split('-> ')[1].split(';')[0] for l in c.to_qasm().splitlines()
+               if l.startswith('measure')]
+    assert targets == ['c[0]', 'c[1]']
+
+
+def test_a_qubit_reuse_circuit_exports_completely():
+    """The shape this exists for: measure, reset, use again, three times over."""
+    c = Circuit(2).h[0].cx[0, 1]
+    for i in range(3):
+        c.m(key=f's{i}')[1]
+        if i < 2:
+            c.reset[1].cx[0, 1]
+    qasm = c.to_qasm()
+    assert 'creg c[4];' in qasm
+    measures = [l for l in qasm.splitlines() if l.startswith('measure')]
+    targets = [l.split('-> ')[1].split(';')[0] for l in measures]
+    assert targets == ['c[1]', 'c[2]', 'c[3]']       # no value overwrites another
+    assert qasm.count('reset q[1];') == 2
+    for i, line in enumerate(measures):
+        assert f'key "s{i}"' in line

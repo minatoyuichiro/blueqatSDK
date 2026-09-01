@@ -28,24 +28,37 @@ def _assign_classical_bits(gates, n_qubits):
     the earlier result, which is precisely what a circuit that reuses a qubit
     measured it for.
 
+    A measurement's `key` names a result, so measurements sharing one write to
+    the same classical bit -- which is what makes ``m(key="a")`` mean the same
+    thing in the exported QASM as it does when the circuit is simulated. The
+    exception is ``duplicated="append"``, where blueqat collects a list of
+    separate results and each therefore needs a bit of its own.
+
     Returns the per-measurement assignments in the order they will be emitted,
-    each with a note naming the measurement's key when it has one, since
-    OpenQASM 2.0 has nowhere else to put it.
+    each with a note naming the qubit and key, since OpenQASM 2.0 has nowhere
+    else to record them.
     """
     assignments = []
     used_bits = set()
+    bit_of_key: dict = {}
     next_free = n_qubits
     for gate in gates:
         if gate.lowername != 'measure':
             continue
         key = getattr(gate, 'key', None)
+        appending = getattr(gate, 'duplicated', None) == 'append'
         for qubit in gate.target_iter(n_qubits):
-            if qubit not in used_bits:
+            slot = (key, qubit)
+            if key is not None and not appending and slot in bit_of_key:
+                bit = bit_of_key[slot]
+            elif qubit not in used_bits:
                 bit = qubit
             else:
                 bit = next_free
                 next_free += 1
             used_bits.add(bit)
+            if key is not None and not appending:
+                bit_of_key[slot] = bit
             note = ''
             if bit != qubit or key is not None:
                 note = f'q[{qubit}]'

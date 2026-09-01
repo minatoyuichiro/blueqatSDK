@@ -28,26 +28,32 @@ Claude Code なら:
 ツール一覧
 ----------
 
-``run_circuit(qasm, shots=None, backend="tensornet")``
+``run_qasm(qasm, shots=None, backend="tensornet")``
    OpenQASM 2.0 回路を実行。小さい回路は状態ベクトル、幅の広い回路は
    上位の基底状態確率、 ``shots`` 指定時は測定カウントを返します。
 
-``circuit_stats(qasm)``
+``qasm_stats(qasm)``
    量子ビット数・深さ・ゲート数。
 
-``expectation_value(qasm, hamiltonian)``
+``qasm_expectation(qasm, hamiltonian)``
    :math:`\langle\psi|H|\psi\rangle` 。ハミルトニアンは
    ``"1.5*Z[0]*Z[1] - 0.5*X[0] + 2"`` のようなパウリ式で指定します。
 
-``draw_circuit(qasm)``
+``draw_qasm(qasm)``
    回路図をPNG画像で返します。
 
-``eo_transpile(qasm)``
+``qasm_to_eo_pulses(qasm)``
    論理回路をExchange-Onlyスピン量子ビットのパルスへコンパイルし
    （:doc:`exchange_only` 参照）、パルススケジュールを要約します。
 
 ``blueqat_info()``
    バージョンと機能の一覧。
+
+どのツールも回路を OpenQASM 2.0 のテキストで受け取ります。名前に入っている
+``qasm`` はそのためのものです。blueqat のホスト型サービスは同じ仕事のツールを
+**JSON のゲート列**で提供しており、 ``run_circuit`` のような素の名前だと、
+両方を登録したクライアントは**どちらを呼んでいるか区別できません**（引数を
+拒否されて初めて分かります）。
 
 安全性
 ------

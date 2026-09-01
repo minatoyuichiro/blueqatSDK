@@ -134,5 +134,9 @@ def test_build_server_registers_tools():
     import anyio
     tools = anyio.run(server.list_tools)
     names = {t.name for t in tools}
-    assert {"run_circuit", "circuit_stats", "expectation_value",
-            "draw_circuit", "eo_transpile", "blueqat_info"} <= names
+    # The names say the circuit arrives as QASM, so that a client registering
+    # both this server and blueqat's hosted one (whose tools take a JSON gate
+    # list under bare names like `run_circuit`) can tell them apart.
+    assert {"run_qasm", "qasm_stats", "qasm_expectation", "draw_qasm",
+            "qasm_to_eo_pulses", "run_qasm_on_cloud", "blueqat_info"} <= names
+    assert "run_circuit" not in names
