@@ -113,12 +113,37 @@ OpenQASM 2.0
    from blueqat.circuit_funcs import from_qasm
    c = from_qasm(qasm)
 
-Qiskitから回路を持ち込む
-------------------------
+行列から回路へ
+--------------
 
-blueqat は任意の1量子ビット行列（ ``mat1`` ）は合成できますが、任意の2量子ビット
-ユニタリや等長写像は合成できません。それらは\ **他のツールチェーンに分解させて
-QASM で取り込む**\ のが現実的な経路です:
+1量子ビットの行列は ``mat1`` でそのまま入ります。2量子ビットは
+:func:`~blueqat.decompose.decompose_two_qubit` が分解します:
+
+.. code-block:: python
+
+   from blueqat.decompose import decompose_two_qubit
+
+   c = decompose_two_qubit(matrix)                       # 量子ビット 0 と 1 に
+   c = decompose_two_qubit(matrix, targets=(2, 5), n_qubits=6)
+
+大域位相を除いて厳密です。経路は Cartan（KAK）分解
+
+``U = phase * (A1 (x) A2) exp(i(a XX + b YY + c ZZ)) (A3 (x) A4)``
+
+で、相互作用部を ``rxx`` / ``ryy`` / ``rzz`` として出します（一般のユニタリで3つ、
+コンパイル後で 6 CX）。**消える正準角は落とす**ので、構造のあるゲートは特別扱い
+なしに安くなります。 ``cx`` ・ ``cz`` ・ ``cy`` ・ ``ch`` は回転1つ、 ``iswap``
+は2つ、 ``swap`` は3つです。
+
+.. note::
+
+   6 CX は最適の 3 CX ではありません。そこへ届くには正準角を Weyl chamber へ
+   畳み込み、対応する局所補正を入れる必要があり、\ **未実装**\ です。
+   実機では **CX 予算がおおよそ15個**で結果が残るかどうかが決まるので、
+   一般の2量子ビットブロックを多数積む回路を組む前に、この差は知っておく価値があります。
+
+これより大きいもの（一般の n 量子ビットユニタリや等長写像）の合成器はありません。
+他のツールチェーンに分解させて QASM で取り込んでください:
 
 .. code-block:: python
 

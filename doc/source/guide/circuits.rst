@@ -115,12 +115,40 @@ OpenQASM 2.0
    from blueqat.circuit_funcs import from_qasm
    c = from_qasm(qasm)
 
-Bringing a circuit in from Qiskit
----------------------------------
+Matrices into circuits
+----------------------
 
-blueqat synthesizes arbitrary single-qubit matrices (``mat1``) but not
-arbitrary two-qubit unitaries or isometries. The practical route for those is
-to let another toolchain do the decomposition and import the result as QASM:
+A single-qubit matrix goes straight in as ``mat1``. A two-qubit one is
+decomposed by :func:`~blueqat.decompose.decompose_two_qubit`:
+
+.. code-block:: python
+
+   from blueqat.decompose import decompose_two_qubit
+
+   c = decompose_two_qubit(matrix)                       # on qubits 0 and 1
+   c = decompose_two_qubit(matrix, targets=(2, 5), n_qubits=6)
+
+It is exact up to global phase. The route is the Cartan (KAK) factorization,
+
+``U = phase * (A1 (x) A2) exp(i(a XX + b YY + c ZZ)) (A3 (x) A4)``,
+
+with the interaction emitted as ``rxx``/``ryy``/``rzz`` -- three of them for a
+general unitary, six CX once compiled. Canonical angles that vanish are left
+out, so structured gates cost less without being special-cased: ``cx``, ``cz``,
+``cy`` and ``ch`` each come back as one rotation, ``iswap`` as two, ``swap`` as
+three.
+
+.. note::
+
+   Six CX is not the optimal three. Reaching that needs the canonical angles
+   folded into the Weyl chamber with matching local corrections, which is not
+   implemented. On hardware, where a CX budget of around fifteen is what
+   decides whether a result survives, the difference is worth knowing before
+   building a circuit out of many general two-qubit blocks.
+
+Anything larger -- a general n-qubit unitary, or an isometry -- has no
+synthesizer here. Let another toolchain decompose it and import the result as
+QASM:
 
 .. code-block:: python
 
