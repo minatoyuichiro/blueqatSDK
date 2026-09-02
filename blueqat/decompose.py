@@ -304,13 +304,12 @@ def cosine_sine(matrix: torch.Tensor):
     with `C` and `S` diagonal and non-negative. Returns
     ``(L0, L1, cosines, sines, R0, R1)``.
 
-    SciPy's ``linalg.cossin`` is used when it is installed, because it handles
-    the degenerate cases -- repeated cosines, and columns where the sine
-    vanishes -- that a plain SVD-based construction does not. Those are not
-    exotic: a Toffoli gate and the unitary completion of an isometry both hit
-    them. Without SciPy the fallback below covers matrices whose cosines are
-    distinct, and says so rather than returning factors that are quietly not
-    unitary.
+    SciPy's ``linalg.cossin`` is used when it is installed; the SVD-based
+    fallback below handles the same degenerate cases -- repeated cosines, and
+    columns where the sine vanishes. Those are not exotic: a Toffoli gate and
+    the unitary completion of an isometry both hit them, so the fallback is
+    exercised by the test suite with SciPy made unimportable, not just assumed
+    to work.
     """
     matrix = torch.as_tensor(matrix, dtype=_C)
     size = matrix.shape[0]
@@ -339,15 +338,23 @@ def cosine_sine(matrix: torch.Tensor):
     cosines = cosines[order]
     left_top = left_top[:, order]
     right_top = right_top_h.conj().T[:, order]
-    sines = torch.sqrt(torch.clamp(1 - cosines ** 2, min=0.0))
 
-    # The second left factor follows from lower_left, except where the sine
-    # vanishes and the column carries no information; those are filled with any
-    # vectors completing the basis.
+    # Unitarity gives ``(lower_left R)^H (lower_left R) == diag(sines)^2``
+    # exactly, so the column norms *are* the sines -- and they are the accurate
+    # way to get them. ``sqrt(1 - cosines^2)`` is not: at ``cosines == 1`` the
+    # subtraction cancels to machine epsilon and the square root amplifies that
+    # to ~1.5e-8, which sails past any threshold set at 1e-9 and then divides a
+    # numerically-zero column by a numerically-zero sine. That is the whole of
+    # the "repeated cosines" failure this fallback used to bail out on.
     rotated = lower_left @ right_top
+    sines = torch.linalg.norm(rotated, dim=0).to(cosines.dtype)
+
+    # Where the sine vanishes the column carries no information; those are
+    # filled with any vectors completing the basis.
     left_bottom = torch.zeros_like(left_top)
-    determined = [k for k in range(half) if sines[k] > 1e-9]
-    undetermined = [k for k in range(half) if sines[k] <= 1e-9]
+    tol = 1e-7
+    determined = [k for k in range(half) if sines[k] > tol]
+    undetermined = [k for k in range(half) if sines[k] <= tol]
     for k in determined:
         left_bottom[:, k] = rotated[:, k] / sines[k].to(_C)
     if undetermined:
@@ -358,24 +365,27 @@ def cosine_sine(matrix: torch.Tensor):
         for offset, k in enumerate(undetermined):
             left_bottom[:, k] = filler[:, len(determined) + offset]
 
+    # Both expressions below are exact; divide by whichever of the two is
+    # larger, which is always at least 1/sqrt(2), instead of picking by a
+    # threshold and risking the small one.
     right_bottom = torch.zeros_like(right_top)
     for k in range(half):
-        if cosines[k] > 1e-9:
+        if cosines[k] >= sines[k]:
             right_bottom[:, k] = (lower_right.conj().T @ left_bottom[:, k]) / cosines[k].to(_C)
         else:
             right_bottom[:, k] = -(upper_right.conj().T @ left_top[:, k]) / sines[k].to(_C)
 
-    # This construction is only valid when the cosines are distinct; where they
-    # repeat it silently produces factors that are not unitary, so check instead
-    # of hoping. Installing SciPy takes the exact path above.
+    # Kept as a guard rather than a known limitation: the construction above is
+    # exact, so a non-unitary factor here means an assumption broke (a matrix
+    # that is not unitary to begin with, say), and that is worth saying loudly
+    # rather than returning factors that silently do not multiply back.
     identity = torch.eye(half, dtype=_C)
     for name, factor in (('left', left_bottom), ('right', right_bottom)):
         if not torch.allclose(factor.conj().T @ factor, identity, atol=1e-7):
             raise RuntimeError(
                 f"the cosine-sine decomposition's {name} factor came out non-unitary. "
-                f"This matrix has repeated cosines, which the built-in construction "
-                f"cannot separate; install SciPy (pip install scipy) for the exact "
-                f"decomposition.")
+                f"Check that the input is unitary; if it is, this is a bug. "
+                f"Installing SciPy (pip install scipy) takes a different code path.")
     return left_top, left_bottom, cosines, sines, right_top, right_bottom
 
 

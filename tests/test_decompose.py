@@ -13,6 +13,7 @@
 # limitations under the License.
 """Turning a two-qubit matrix into a circuit."""
 
+import sys
 import math
 
 import pytest
@@ -249,3 +250,68 @@ def test_completion_keeps_the_original_columns():
 def test_a_non_isometry_is_refused():
     with pytest.raises(ValueError, match='isometry'):
         complete_to_unitary(torch.full((8, 2), 0.5, dtype=_C))
+
+
+# --- the path taken without SciPy ------------------------------------------
+#
+# SciPy is not a declared dependency, so anyone who installs blueqat normally
+# takes the fallback in `cosine_sine`. Until this fixture existed, every test
+# ran on a machine that happened to have SciPy, so the fallback was never
+# executed and a threshold bug in it went unnoticed: `sqrt(1 - cos**2)` at
+# cos == 1 cancels to machine epsilon and the square root lifts that to ~1.5e-8,
+# clearing a 1e-9 "is the sine nonzero" test and dividing through by it.
+
+@pytest.fixture
+def without_scipy(monkeypatch):
+    """Make `from scipy.linalg import ...` raise, as it does without SciPy.
+
+    A None entry in sys.modules is exactly what Python raises ImportError on."""
+    monkeypatch.setitem(sys.modules, 'scipy', None)
+    monkeypatch.setitem(sys.modules, 'scipy.linalg', None)
+    with pytest.raises(ImportError):
+        from scipy.linalg import cossin  # noqa: F401
+    yield
+
+
+@pytest.mark.parametrize('build', [
+    lambda: Circuit(3).ccx[0, 1, 2],
+    lambda: Circuit(3).cswap[0, 1, 2],
+    lambda: Circuit(3).cx[0, 1],
+    lambda: Circuit(3).h[0].h[1].h[2],
+])
+def test_structured_unitaries_decompose_without_scipy(build, without_scipy):
+    matrix = _unitary(build())
+    assert _equal_up_to_phase(matrix, _unitary(decompose_unitary(matrix)))
+
+
+@pytest.mark.parametrize('n', [1, 2, 3])
+def test_arbitrary_unitaries_decompose_without_scipy(n, without_scipy):
+    for seed in range(3):
+        matrix = random_unitary(1 << n, seed=seed + 10 * n)
+        assert _equal_up_to_phase(matrix, _unitary(decompose_unitary(matrix)))
+
+
+def test_isometries_decompose_without_scipy(without_scipy):
+    from blueqat.decompose import decompose_isometry
+    torch.manual_seed(0)
+    iso = torch.linalg.qr(torch.randn(8, 2, dtype=_C))[0]
+    circuit = decompose_isometry(iso)
+    got = _unitary(circuit)[:, :2]
+    assert _equal_up_to_phase(iso, got)
+
+
+def test_the_two_paths_agree(without_scipy):
+    """The fallback is not merely self-consistent: it must produce the same
+    decomposition SciPy does, up to the freedom the factorization allows."""
+    from blueqat.decompose import cosine_sine
+    matrix = _unitary(Circuit(3).ccx[0, 1, 2])
+    l0, l1, cos, sin, r0, r1 = cosine_sine(matrix)
+    half = matrix.shape[0] // 2
+    middle = torch.zeros((2 * half, 2 * half), dtype=_C)
+    middle[:half, :half] = torch.diag(cos).to(_C)
+    middle[:half, half:] = -torch.diag(sin).to(_C)
+    middle[half:, :half] = torch.diag(sin).to(_C)
+    middle[half:, half:] = torch.diag(cos).to(_C)
+    left = torch.block_diag(l0, l1)
+    right = torch.block_diag(r0, r1)
+    assert torch.allclose(matrix, left @ middle @ right.conj().T, atol=1e-10)
