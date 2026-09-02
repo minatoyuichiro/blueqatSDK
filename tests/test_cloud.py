@@ -442,3 +442,70 @@ def test_task_id_is_escaped_into_the_path():
     cloud.configure(api_key="k", transport=t)
     cloud.hardware_job("a/b")
     assert t.calls[0]["path"] == "/hardware/jobs/a%2Fb"
+
+
+# --- the request headers themselves ----------------------------------------
+#
+# Every other test here goes through FakeTransport, which never builds a real
+# request -- so nothing pinned the headers. The service sits behind Cloudflare,
+# which rejects urllib's default "Python-urllib/x.y" signature with a 403
+# *before the request reaches the service at all*. Dropping the User-Agent in a
+# tidy-up would break every call against the live endpoint while the whole
+# suite stayed green, and the failure would read as "the service is down".
+
+def _captured_request(method='GET', path='/health', payload=None, api_key=None):
+    import urllib.request
+    seen = {}
+
+    class Response:
+        status = 200
+        def read(self): return b'{}'
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def urlopen(req, timeout=None):
+        seen['request'] = req
+        seen['timeout'] = timeout
+        return Response()
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(urllib.request, 'urlopen', urlopen)
+    try:
+        cloud._http_transport(method, path, payload, api_key, cloud.DEFAULT_ENDPOINT)
+    finally:
+        monkeypatch.undo()
+    return seen
+
+
+def test_requests_name_a_user_agent():
+    seen = _captured_request()
+    agent = seen['request'].get_header('User-agent')
+    assert agent, "no User-Agent: Cloudflare answers urllib's default with 403"
+    assert not agent.lower().startswith('python-urllib')
+    assert 'blueqat' in agent.lower()
+
+
+def test_user_agent_carries_the_version():
+    from blueqat._version import __version__
+    assert __version__ in _captured_request()['request'].get_header('User-agent')
+
+
+def test_api_key_travels_as_a_bearer_token_only_when_present():
+    with_key = _captured_request(api_key='secret')
+    assert with_key['request'].get_header('Authorization') == 'Bearer secret'
+    assert _captured_request(api_key=None)['request'].get_header('Authorization') is None
+
+
+def test_a_payload_is_json_and_sets_its_content_type():
+    seen = _captured_request('POST', '/circuits/run', {'shots': 4})
+    assert json.loads(seen['request'].data.decode()) == {'shots': 4}
+    assert seen['request'].get_header('Content-type') == 'application/json'
+    assert seen['request'].get_method() == 'POST'
+    # A GET carries no body and needs no content type.
+    plain = _captured_request('GET', '/health')
+    assert plain['request'].data is None
+    assert plain['request'].get_header('Content-type') is None
+
+
+def test_requests_carry_the_timeout():
+    assert _captured_request()['timeout'] == cloud.REQUEST_TIMEOUT
