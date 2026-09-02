@@ -25,11 +25,10 @@ class FlexibleCircuitComposer:
         for op in ops:
             gate_name = op.lowername.upper()
             
-            # 🛠️ 【修正】 op.targets が int 型の場合はリストに包んでから set に変換する
-            if isinstance(op.targets, int):
-                gate_targets = {op.targets}
-            else:
-                gate_targets = set(op.targets)
+            # スライス指定 (h[:] や m[:]) は最も自然な書き方で、README にも出てくる。
+            # set(op.targets) は slice を受け取れず TypeError になっていたので、
+            # 他のバックエンドと同じく target_iter で明示的な添字へ展開する。
+            gate_targets = set(op.target_iter(n_qubits if n_qubits else 0))
             
             if current_block is None:
                 current_block = {

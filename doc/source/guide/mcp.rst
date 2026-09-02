@@ -29,27 +29,33 @@ For Claude Code:
 Tools
 -----
 
-``run_circuit(qasm, shots=None, backend="tensornet")``
+``run_qasm(qasm, shots=None, backend="tensornet")``
    Run an OpenQASM 2.0 circuit. Returns the statevector for small circuits,
    the largest basis-state probabilities for wide ones, or measurement
    counts when ``shots`` is given.
 
-``circuit_stats(qasm)``
+``qasm_stats(qasm)``
    Qubit count, depth and gate counts.
 
-``expectation_value(qasm, hamiltonian)``
+``qasm_expectation(qasm, hamiltonian)``
    :math:`\langle\psi|H|\psi\rangle` with the Hamiltonian written as a Pauli
    expression such as ``"1.5*Z[0]*Z[1] - 0.5*X[0] + 2"``.
 
-``draw_circuit(qasm)``
+``draw_qasm(qasm)``
    The circuit diagram as a PNG image.
 
-``eo_transpile(qasm)``
+``qasm_to_eo_pulses(qasm)``
    Compile the logical circuit to exchange-only spin-qubit pulses
    (see :doc:`exchange_only`) and summarize the pulse schedule.
 
 ``blueqat_info()``
    Version and capability summary.
+
+Every tool takes the circuit as OpenQASM 2.0 text, which is what the ``qasm``
+in its name is for. blueqat's hosted service offers tools for the same jobs
+that take a JSON gate list instead; under bare names like ``run_circuit`` a
+client with both registered cannot tell which one it is calling, and finds out
+only by having its arguments rejected.
 
 Safety
 ------

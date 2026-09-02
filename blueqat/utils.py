@@ -615,14 +615,38 @@ def check_unitarity(mat: torch.Tensor) -> bool:
 
 
 def calc_u_params(mat: torch.Tensor) -> Tuple[float, float, float, float]:
-    """Calculate U-gate parameters from a 2x2 unitary matrix."""
+    """Calculate U-gate parameters from a 2x2 unitary matrix.
+
+    ``U(theta, phi, lam, gamma)`` is
+
+    ``e^{i gamma} [[cos(t), -e^{i lam} sin(t)], [e^{i phi} sin(t),
+    e^{i(phi+lam)} cos(t)]]`` with ``t = theta / 2``.
+
+    The general route reads `gamma` off ``mat[0, 0]`` and ``phi + lam`` off
+    ``mat[1, 1]``. An antidiagonal unitary -- X and Y among them -- has both of
+    those equal to zero, and ``cmath.phase(0)`` returns ``0.0`` without
+    complaint, so two free phases silently vanish and the reconstructed gate is
+    a different unitary, not merely a different global phase. That case is
+    handled separately below.
+    """
     assert mat.shape == (2, 2)
     assert check_unitarity(mat)
-    gamma = cmath.phase(complex(mat[0, 0]))
+    m00, m01, m10, m11 = (complex(mat[0, 0]), complex(mat[0, 1]),
+                          complex(mat[1, 0]), complex(mat[1, 1]))
+
+    if abs(m00) < 1e-12:
+        # cos(theta/2) == 0, so theta = pi and the matrix is [[0, -e^{i(g+l)}],
+        # [e^{i(g+p)}, 0]]. Only the two sums are determined; gamma is free, and
+        # taking it as 0 reconstructs the input exactly.
+        theta = math.pi
+        gamma = 0.0
+        phi = cmath.phase(m10) % (2.0 * math.pi)
+        lam = cmath.phase(-m01) % (2.0 * math.pi)
+        return theta, phi, lam, gamma
+
+    gamma = cmath.phase(m00)
     phase = cmath.exp(-1j * gamma)
-    m00 = complex(mat[0, 0]) * phase
-    m10 = complex(mat[1, 0]) * phase
-    m11 = complex(mat[1, 1]) * phase
+    m00, m10, m11 = m00 * phase, m10 * phase, m11 * phase
     theta = math.atan2(abs(m10), m00.real) * 2.0
     phi_plus_lambda = cmath.phase(m11)
     phi = cmath.phase(m10) % (2.0 * math.pi)
@@ -744,6 +768,14 @@ class QaoaAnsatz(AnsatzBase):
         self.step = step
         self.n_qubits = self.hamiltonian.max_n() + 1
         
+        # A custom mixer may touch qubits the Hamiltonian never mentions. Taking
+        # the width from init_circuit alone built the Hamiltonian's matrix narrow
+        # while get_circuit() produced a wider state, and the expectation failed
+        # on a dimension mismatch deep inside the optimizer.
+        if mixer is not None:
+            mixer_width = mixer.to_expr().max_n() + 1 if hasattr(mixer, 'to_expr') else 0
+            self.n_qubits = max(self.n_qubits, mixer_width)
+
         if init_circuit:
             self.init_circuit = init_circuit
             if init_circuit.n_qubits > self.n_qubits: self.n_qubits = init_circuit.n_qubits

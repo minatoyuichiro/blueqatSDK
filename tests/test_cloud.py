@@ -267,3 +267,178 @@ def test_live_rejects_bad_key():
     cloud.configure(api_key="definitely-not-a-real-key")
     with pytest.raises(RuntimeError, match="401"):
         Circuit(1).h[0].run(backend="cloud", shots=10)
+
+
+# --- Gateway timeouts: "I don't know" is not "it failed" -------------------
+#
+# Cloudflare's 524 fires after ~100s of silence from the origin. That is a
+# limit on how long a reply may take to *start*, not on how long the work may
+# take: the request has already arrived and is very likely still running or
+# already done. Reporting it as a plain failure invites a resubmission, and a
+# resubmitted hardware job spends another scarce slot and more money.
+
+def _raise_http(code, detail='timeout'):
+    import io
+    import urllib.error
+
+    def transport(*args, **kwargs):
+        raise urllib.error.HTTPError(
+            'https://qapi.blueqat.app/v1/x', code, 'Gateway Timeout', {},
+            io.BytesIO(json.dumps({'detail': detail}).encode()))
+    return transport
+
+
+@pytest.mark.parametrize('code', [504, 522, 523, 524])
+def test_gateway_timeout_is_not_reported_as_failure(code, monkeypatch):
+    import urllib.request
+    monkeypatch.setattr(urllib.request, 'urlopen', _raise_http(code))
+    with pytest.raises(cloud.CloudOutcomeUnknown) as exc:
+        cloud._http_transport('POST', '/hardware/jobs', {}, 'k', cloud.DEFAULT_ENDPOINT)
+    msg = str(exc.value)
+    assert str(code) in msg
+    # The caller must be told not to blindly resubmit.
+    assert 'not a failure' in msg and 'resubmit' in msg
+
+
+def test_gateway_timeout_is_distinguishable_from_a_real_error(monkeypatch):
+    """A caller must be able to tell the two apart with `except`."""
+    import urllib.request
+    monkeypatch.setattr(urllib.request, 'urlopen', _raise_http(500, 'boom'))
+    with pytest.raises(RuntimeError) as exc:
+        cloud._http_transport('POST', '/x', {}, 'k', cloud.DEFAULT_ENDPOINT)
+    assert not isinstance(exc.value, cloud.CloudOutcomeUnknown)
+    # ...while still being a RuntimeError, so existing handlers keep working.
+    assert isinstance(exc.value, RuntimeError)
+    assert issubclass(cloud.CloudOutcomeUnknown, RuntimeError)
+
+
+def test_401_still_beats_the_timeout_branch(monkeypatch):
+    import urllib.request
+    monkeypatch.setattr(urllib.request, 'urlopen', _raise_http(401, ''))
+    with pytest.raises(RuntimeError, match='rejected the API key'):
+        cloud._http_transport('GET', '/me', None, 'k', cloud.DEFAULT_ENDPOINT)
+
+
+@pytest.mark.parametrize('raised', ['bare', 'wrapped'])
+def test_socket_timeout_is_also_an_unknown_outcome(raised, monkeypatch):
+    """urlopen raises the socket timeout bare or wrapped in URLError depending
+    on where it fires; both mean the request may already have landed."""
+    import socket
+    import urllib.error
+    import urllib.request
+
+    def transport(*args, **kwargs):
+        if raised == 'bare':
+            raise socket.timeout('timed out')
+        raise urllib.error.URLError(socket.timeout('timed out'))
+
+    monkeypatch.setattr(urllib.request, 'urlopen', transport)
+    with pytest.raises(cloud.CloudOutcomeUnknown, match='resubmitting'):
+        cloud._http_transport('POST', '/circuits/run', {}, 'k', cloud.DEFAULT_ENDPOINT)
+
+
+def test_unreachable_host_is_still_a_plain_failure(monkeypatch):
+    """A connection that never opened did *not* land -- keep it distinguishable."""
+    import urllib.error
+    import urllib.request
+
+    def transport(*args, **kwargs):
+        raise urllib.error.URLError(ConnectionRefusedError('refused'))
+
+    monkeypatch.setattr(urllib.request, 'urlopen', transport)
+    with pytest.raises(RuntimeError, match='Cannot reach') as exc:
+        cloud._http_transport('GET', '/health', None, None, cloud.DEFAULT_ENDPOINT)
+    assert not isinstance(exc.value, cloud.CloudOutcomeUnknown)
+
+
+# --- Recovering from an unknown outcome ------------------------------------
+#
+# A gateway timeout is only actionable if the caller can find out what
+# happened. These are the calls that answer that, so they are pinned to the
+# paths and verbs the service actually publishes.
+
+def test_hardware_jobs_lists_recent_submissions():
+    t = FakeTransport({"jobs": [{"task_id": "abc", "status": "QUEUED"}]})
+    cloud.configure(api_key="k", transport=t)
+    assert cloud.hardware_jobs()["jobs"][0]["task_id"] == "abc"
+    assert t.calls[0]["method"] == "GET"
+    assert t.calls[0]["path"] == "/hardware/jobs?limit=20"
+    cloud.hardware_jobs(limit=5)
+    assert t.calls[1]["path"] == "/hardware/jobs?limit=5"
+
+
+@pytest.mark.parametrize('call,args,method,path', [
+    ('hardware_job', ('t1', ), 'GET', '/hardware/jobs/t1'),
+    ('hardware_job_result', ('t1', ), 'GET', '/hardware/jobs/t1/result'),
+    ('cancel_hardware_job', ('t1', ), 'POST', '/hardware/jobs/t1/cancel'),
+    ('hardware_next_window', (), 'GET', '/hardware/qpus/next-window'),
+    ('hardware_calibration', (), 'GET', '/hardware/qpus/calibration'),
+])
+def test_hardware_job_endpoints(call, args, method, path):
+    t = FakeTransport({"status": "COMPLETED"})
+    cloud.configure(api_key="k", transport=t)
+    getattr(cloud, call)(*args)
+    assert (t.calls[0]["method"], t.calls[0]["path"]) == (method, path)
+
+
+def test_qpu_id_becomes_a_query_parameter():
+    t = FakeTransport({})
+    cloud.configure(api_key="k", transport=t)
+    cloud.hardware_job("t1", qpu_id="lucy/sim")
+    # Must be escaped: a raw '/' would change the path, not the query.
+    assert t.calls[0]["path"] == "/hardware/jobs/t1?qpu_id=lucy%2Fsim"
+
+
+def test_hardware_quote_asks_before_spending():
+    t = FakeTransport({"cost": 12.5, "currency": "JPY"})
+    cloud.configure(api_key="k", transport=t)
+    assert cloud.hardware_quote(1000, payer="me")["cost"] == 12.5
+    assert t.calls[0]["method"] == "POST" and t.calls[0]["path"] == "/hardware/quote"
+    assert t.calls[0]["payload"] == {"shots": 1000, "payer": "me"}
+
+
+def test_submit_sends_preserve_layout():
+    t = FakeTransport({"task_id": "x"})
+    cloud.configure(api_key="k", transport=t)
+    cloud.submit_hardware_job(Circuit(1).h[0].m[:], shots=10, confirm=True)
+    assert t.calls[0]["payload"]["preserve_layout"] is False
+    cloud.submit_hardware_job(Circuit(1).h[0].m[:], shots=10, confirm=True,
+                              preserve_layout=True)
+    assert t.calls[1]["payload"]["preserve_layout"] is True
+
+
+def test_all_job_calls_require_a_key():
+    """None of the recovery calls may silently run unauthenticated: an
+    unauthenticated list would look like "no jobs", i.e. "it did not land"."""
+    cloud.reset_configuration()
+    for call, args in [('hardware_jobs', ()), ('hardware_job', ('t', )),
+                       ('hardware_job_result', ('t', )),
+                       ('cancel_hardware_job', ('t', )),
+                       ('hardware_quote', (10, 'me')),
+                       ('hardware_next_window', ()),
+                       ('hardware_calibration', ())]:
+        with pytest.raises(RuntimeError, match='API key is not set'):
+            getattr(cloud, call)(*args)
+
+
+def test_timeout_message_names_the_recovery_call():
+    """The warning is only useful if it says how to check."""
+    import urllib.request
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(urllib.request, 'urlopen', _raise_http(524))
+    try:
+        with pytest.raises(cloud.CloudOutcomeUnknown) as exc:
+            cloud._http_transport('POST', '/hardware/jobs', {}, 'k',
+                                  cloud.DEFAULT_ENDPOINT)
+        assert 'hardware_jobs()' in str(exc.value)
+    finally:
+        monkeypatch.undo()
+
+
+def test_task_id_is_escaped_into_the_path():
+    """An id is interpolated into the path; `quote` passes '/' through unless
+    `safe=""`, so an unescaped one would address a different endpoint."""
+    t = FakeTransport({})
+    cloud.configure(api_key="k", transport=t)
+    cloud.hardware_job("a/b")
+    assert t.calls[0]["path"] == "/hardware/jobs/a%2Fb"

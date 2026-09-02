@@ -40,9 +40,12 @@ Get an API key at https://mcp.blueqat.app/login.
 
 import json
 import os
+import socket
 import stat
 import urllib.error
+import urllib.parse
 import urllib.request
+import warnings
 from collections import Counter as _Counter
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -53,6 +56,22 @@ from .gate import Operation
 DEFAULT_ENDPOINT = "https://qapi.blueqat.app/v1"
 ENV_API_KEY = "BLUEQAT_API_KEY"
 REQUEST_TIMEOUT = 120.0
+
+#: Status codes meaning "the gateway gave up waiting", not "the work failed".
+#: Cloudflare's 524 in particular fires after 100 seconds of silence from the
+#: origin -- a limit on how long a reply may take to *start*, not on how long
+#: the work may take. Treating one as a failure invites a resubmission, which
+#: for a hardware job costs another slot and more money.
+GATEWAY_TIMEOUTS = frozenset({504, 522, 523, 524})
+
+
+class CloudOutcomeUnknown(RuntimeError):
+    """The request's fate is unknown: it may have succeeded.
+
+    Raised instead of a plain error when the connection or the gateway timed
+    out, so that a caller can tell "this did not happen" apart from "I do not
+    know whether this happened" -- and does not retry the second one blindly.
+    """
 
 _session: Dict[str, Any] = {"api_key": None, "endpoint": None, "transport": None}
 
@@ -88,11 +107,34 @@ def save_api_key(api_key: str, endpoint: Optional[str] = None) -> Path:
     data["api_key"] = api_key
     if endpoint is not None:
         data["endpoint"] = endpoint
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2)
-    # API keys are secrets: restrict the file to its owner.
-    os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+    _write_private(path, data)
     return path
+
+
+def _write_private(path: 'Path', data: Dict[str, Any]) -> None:
+    """Write the config so that only its owner can ever read it.
+
+    Creating the file with 0o600 rather than chmod-ing afterwards closes the
+    window in which it exists at whatever the umask allows. On Windows
+    ``os.chmod`` only touches the read-only bit and cannot make a file
+    owner-only at all, so the key is written to a directory locked down instead,
+    and a warning says so rather than leaving a false sense of protection.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    descriptor = os.open(path, flags, stat.S_IRUSR | stat.S_IWUSR)
+    with os.fdopen(descriptor, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2)
+    if os.name == 'nt':
+        try:
+            os.chmod(path.parent, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+        except OSError:
+            pass
+        warnings.warn(
+            f"{path} holds an API key, but Windows cannot restrict a file to its "
+            f"owner through os.chmod. Check the file's ACL if this machine has "
+            f"other users.", stacklevel=3)
+    else:
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
 
 
 def delete_api_key() -> None:
@@ -101,9 +143,7 @@ def delete_api_key() -> None:
     data = _load_config_file()
     if "api_key" in data:
         del data["api_key"]
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2)
-        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+        _write_private(path, data)
 
 
 def get_api_key() -> Optional[str]:
@@ -177,8 +217,28 @@ def _http_transport(method: str, path: str, payload: Optional[dict],
             raise RuntimeError(
                 "Blueqat cloud rejected the API key (401). "
                 f"{detail or 'Get a key at https://mcp.blueqat.app/login.'}") from None
+        if e.code in GATEWAY_TIMEOUTS:
+            raise CloudOutcomeUnknown(
+                f"The gateway stopped waiting for the Blueqat cloud after "
+                f"{e.code} on {method} {path}. This is not a failure: the request "
+                f"very likely arrived and may well have completed -- the gateway "
+                f"gave up on the reply, not on the work. Do not resubmit before "
+                f"checking whether it landed -- blueqat.cloud.hardware_jobs() lists "
+                f"your recent submissions -- especially for a hardware job, "
+                f"where resubmitting spends another slot and more money."
+                + (f" {detail}" if detail else "")) from None
         raise RuntimeError(f"Blueqat cloud error {e.code}: {detail or e.reason}") from None
+    except socket.timeout:
+        raise CloudOutcomeUnknown(
+            f"Timed out after {REQUEST_TIMEOUT:g}s waiting for {method} {path}. "
+            f"The request may still have been received and acted on; check with "
+            f"blueqat.cloud.hardware_jobs() before resubmitting.") from None
     except urllib.error.URLError as e:
+        if isinstance(e.reason, socket.timeout):
+            raise CloudOutcomeUnknown(
+                f"Timed out after {REQUEST_TIMEOUT:g}s waiting for {method} {path}. "
+                f"The request may still have been received and acted on; check with "
+                f"blueqat.cloud.hardware_jobs() before resubmitting.") from None
         raise RuntimeError(f"Cannot reach the Blueqat cloud at {url}: {e.reason}") from None
 
 
@@ -231,7 +291,18 @@ def hamiltonian_to_terms(hamiltonian) -> Tuple[List[dict], float]:
     constant = 0.0
     for term in expr:
         coeff = term.coeff
-        coeff = float(coeff.real) if isinstance(coeff, complex) else float(coeff)
+        if isinstance(coeff, complex):
+            # A Hamiltonian is Hermitian, so a Pauli term with an imaginary
+            # coefficient is not one. Dropping the imaginary part quietly sends a
+            # different operator than the caller wrote.
+            if abs(coeff.imag) > 1e-12:
+                raise ValueError(
+                    f"Term {term!r} has a complex coefficient ({coeff}); a "
+                    f"Hamiltonian must be Hermitian. Check for a missing "
+                    f"conjugate, or use .simplify() on the expression.")
+            coeff = float(coeff.real)
+        else:
+            coeff = float(coeff)
         if not term.ops:
             constant += coeff
             continue
@@ -355,7 +426,8 @@ def hardware_qpus() -> dict:
 
 
 def submit_hardware_job(circuit, shots: int, qpu_id: Optional[str] = None,
-                        confirm: bool = False) -> dict:
+                        confirm: bool = False,
+                        preserve_layout: bool = False) -> dict:
     """Submit a circuit to real quantum hardware.
 
     Requires `confirm=True`: hardware runs cost real money and are subject
@@ -366,10 +438,64 @@ def submit_hardware_job(circuit, shots: int, qpu_id: Optional[str] = None,
             "pass confirm=True to proceed.")
     n, gate_list = circuit_to_gates(circuit)
     payload: Dict[str, Any] = {"n_qubits": n, "gates": gate_list,
-                               "shots": int(shots), "confirm": True}
+                               "shots": int(shots), "confirm": True,
+                               "preserve_layout": bool(preserve_layout)}
     if qpu_id is not None:
         payload["qpu_id"] = qpu_id
     return _request("POST", "/hardware/jobs", payload)
+
+
+def _quote(v) -> str:
+    """Escape a path segment. `safe=""` matters: `quote` passes '/' through by
+    default, so an id containing one would silently change the path."""
+    return urllib.parse.quote(str(v), safe="")
+
+
+def _qpu_query(qpu_id: Optional[str]) -> str:
+    return f"?qpu_id={_quote(qpu_id)}" if qpu_id is not None else ""
+
+
+def hardware_jobs(limit: int = 20) -> dict:
+    """List your recent hardware jobs, newest first.
+
+    This is the way to answer "did my submission actually land?" after a
+    `CloudOutcomeUnknown` -- check here before resubmitting, since a duplicate
+    hardware job spends another slot and more money."""
+    return _request("GET", f"/hardware/jobs?limit={int(limit)}")
+
+
+def hardware_job(task_id: str, qpu_id: Optional[str] = None) -> dict:
+    """Status of one hardware job."""
+    return _request("GET", f"/hardware/jobs/{_quote(task_id)}{_qpu_query(qpu_id)}")
+
+
+def hardware_job_result(task_id: str, qpu_id: Optional[str] = None) -> dict:
+    """Result of a finished hardware job."""
+    return _request("GET", f"/hardware/jobs/{_quote(task_id)}/result{_qpu_query(qpu_id)}")
+
+
+def cancel_hardware_job(task_id: str, qpu_id: Optional[str] = None) -> dict:
+    """Cancel a queued hardware job."""
+    return _request("POST", f"/hardware/jobs/{_quote(task_id)}/cancel{_qpu_query(qpu_id)}")
+
+
+def hardware_quote(shots: int, payer: str) -> dict:
+    """What a hardware run would cost, before committing to it."""
+    return _request("POST", "/hardware/quote",
+                    {"shots": int(shots), "payer": str(payer)})
+
+
+def hardware_next_window(qpu_id: Optional[str] = None) -> dict:
+    """When the next hardware submission window opens.
+
+    Hardware is not always accepting jobs; a submission outside a window
+    queues until the next one."""
+    return _request("GET", f"/hardware/qpus/next-window{_qpu_query(qpu_id)}")
+
+
+def hardware_calibration(qpu_id: Optional[str] = None) -> dict:
+    """Current per-qubit calibration data (error rates, coherence times)."""
+    return _request("GET", f"/hardware/qpus/calibration{_qpu_query(qpu_id)}")
 
 
 # Importing blueqat.cloud makes the backend available as backend='cloud'.

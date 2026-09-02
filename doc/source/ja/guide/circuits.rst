@@ -113,6 +113,88 @@ OpenQASM 2.0
    from blueqat.circuit_funcs import from_qasm
    c = from_qasm(qasm)
 
+行列から回路へ
+--------------
+
+1量子ビットの行列は ``mat1`` でそのまま入ります。2量子ビットは
+:func:`~blueqat.decompose.decompose_two_qubit` が分解します:
+
+.. code-block:: python
+
+   from blueqat.decompose import decompose_two_qubit
+
+   c = decompose_two_qubit(matrix)                       # 量子ビット 0 と 1 に
+   c = decompose_two_qubit(matrix, targets=(2, 5), n_qubits=6)
+
+大域位相を除いて厳密です。経路は Cartan（KAK）分解
+
+``U = phase * (A1 (x) A2) exp(i(a XX + b YY + c ZZ)) (A3 (x) A4)``
+
+で、相互作用部を ``rxx`` / ``ryy`` / ``rzz`` として出します（一般のユニタリで3つ、
+コンパイル後で 6 CX）。**消える正準角は落とす**\ ので、構造のあるゲートは特別扱い
+なしに安くなります。 ``cx`` ・ ``cz`` ・ ``cy`` ・ ``ch`` は回転1つ、 ``iswap``
+は2つ、 ``swap`` は3つです。
+
+6 CX は最適の 3 CX ではありません。実機では **CX 予算がおおよそ15個**\ で結果が
+残るかどうかが決まるので、この差は効きます。
+:func:`~blueqat.decompose.synthesize_two_qubit` は、解くのではなく
+**3CX 回路を勾配降下で目標に当てはめる**\ ことで 3 CX に届きます:
+
+.. code-block:: python
+
+   from blueqat.decompose import synthesize_two_qubit
+
+   synthesize_two_qubit(matrix)              # ちょうど 3 CX
+
+当てはめは仮定せず\ **検査**\ します（ ``tol`` 以下の不忠実度に届かなければ例外）。
+厳密性がゲート数より大事なら閉形式を、実機へ持っていくならこちらを使ってください。
+
+より大きいユニタリと等長写像
+----------------------------
+
+:func:`~blueqat.decompose.decompose_unitary` は任意の ``2**n x 2**n`` ユニタリを
+Quantum Shannon 分解で、 :func:`~blueqat.decompose.decompose_isometry` は
+``2**n x 2**k`` の等長写像を扱います:
+
+.. code-block:: python
+
+   from blueqat.decompose import decompose_unitary, decompose_isometry
+
+   decompose_unitary(matrix)                 # n 量子ビット
+   decompose_isometry(v)                     # 入力 k 量子ビット、n まで padding
+
+等長写像の回路は、\ **入力レジスタより上の量子ビットが** ``|0>`` **から始まるとき**\ に
+その等長写像を再現します。これは行列積状態を逐次生成回路として書いたときの形そのもので、
+各サイトのテンソルがボンドを「ボンド＋新しいサイト」へ写します。
+
+コストは ``4**n`` で増えます。2量子ビットで 3 CX、3量子ビットで 2量子ビットゲート24個、
+4量子ビットで120個。\ **最適化された構成ではなく正しい構成**\ なので、実機へ持っていく
+回路では先にゲート数を数えてください。
+
+.. note::
+
+   cosine-sine 分解には、scipy が入っていればそれを使います。\ **縮退した場合を厳密に
+   扱えるのはそのときだけ**\ です。縮退は例外的な状況ではありません — Toffoli ゲートも、
+   等長写像をユニタリへ補完したものも、余弦が重複します。scipy が無い場合の内蔵実装は
+   余弦が相異なる行列のみを扱い、それ以外は\ **黙ってユニタリでない因子を返さずエラー**\ にします。
+
+これらより強く最適化された分解が要る場合は、他のツールチェーンの出力を QASM で
+取り込んでください:
+
+.. code-block:: python
+
+   # Qiskit 側で、パーサが読める基底へ transpile してから出力する
+   #   qc = transpile(circuit, basis_gates=["u", "cx"])
+   #   text = qasm2.dumps(qc)
+
+   from blueqat.circuit_funcs.qasm_parser import from_qasm
+   c = from_qasm(text)
+   c.run(shots=200000, seed=1)
+
+``u`` ・ ``cx`` ・ ``reset`` ・ ``barrier`` ・ ``measure`` はいずれもそのまま
+通ります。ただし\ **測定のキーは失われます**\ （OpenQASM 2.0 に置き場所が
+ありません）。結果に名前が要る場合は blueqat 側で ``m(key=...)`` を足してください。
+
 JSONシリアライズ
 ----------------
 

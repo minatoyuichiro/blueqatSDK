@@ -195,21 +195,29 @@ def build_server():
     server = _Server(
         "blueqat",
         instructions=(
-            "Quantum computing with the blueqat SDK. Circuits are OpenQASM "
-            "2.0 text; qubit 0 is the least-significant bit of basis-state "
-            "indices/bitstrings. Use run_circuit for states and sampling, "
-            "expectation_value for Hamiltonians, draw_circuit for diagrams, "
-            "and eo_transpile for exchange-only spin-qubit pulse compilation."))
+            "Quantum computing with the blueqat SDK, running locally. Every "
+            "tool here takes the circuit as OpenQASM 2.0 text, which is what "
+            "the 'qasm' in its name means; qubit 0 is the least-significant bit "
+            "of basis-state indices/bitstrings. Use run_qasm for states and "
+            "sampling, qasm_expectation for Hamiltonians, draw_qasm for "
+            "diagrams, and qasm_to_eo_pulses for exchange-only spin-qubit pulse "
+            "compilation."))
 
-    server.tool()(run_circuit)
-    server.tool()(circuit_stats)
-    server.tool()(expectation_value)
-    server.tool()(eo_transpile)
-    server.tool()(cloud_run_circuit)
-    server.tool()(cloud_hardware_status)
-    server.tool()(blueqat_info)
+    # The tool names say that a circuit arrives as QASM text. blueqat's hosted
+    # service exposes tools for the same jobs that take a JSON gate list
+    # instead, and under bare names like `run_circuit` a client with both
+    # registered cannot tell which it is calling -- the arguments differ, so it
+    # finds out by being rejected. The Python functions keep their own names, so
+    # importing this module is unaffected.
+    server.tool(name="run_qasm")(run_circuit)
+    server.tool(name="qasm_stats")(circuit_stats)
+    server.tool(name="qasm_expectation")(expectation_value)
+    server.tool(name="qasm_to_eo_pulses")(eo_transpile)
+    server.tool(name="run_qasm_on_cloud")(cloud_run_circuit)
+    server.tool(name="cloud_hardware_status")(cloud_hardware_status)
+    server.tool(name="blueqat_info")(blueqat_info)
 
-    @server.tool()
+    @server.tool(name="draw_qasm")
     def draw_circuit(qasm: str) -> Image:
         """Render an OpenQASM 2.0 circuit as a diagram image."""
         return Image(data=draw_circuit_png(qasm), format='png')

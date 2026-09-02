@@ -58,12 +58,49 @@ APIキー
 
 .. code-block:: python
 
-   cloud.hardware_status()         # 実機ステータス (公開・キー不要)
-   cloud.hardware_qpus()           # 利用可能なQPU一覧 (要認証)
-   cloud.submit_hardware_job(c, shots=100, confirm=True)
+   cloud.hardware_status()         # QPU の状態（鍵なしで見られます）
+   cloud.hardware_qpus()           # 使える QPU の一覧
+   cloud.hardware_calibration()    # 量子ビットごとの誤り率とコヒーレンス時間
+   cloud.hardware_next_window()    # 次に投入を受け付ける時間帯
+   cloud.hardware_quote(shots=100, payer="me")   # 投入する前に費用を見る
 
-``submit_hardware_job`` は ``confirm=True`` が必須です: 実機実行は実費が
-発生し、アカウントのクォータの対象になります。
+   job = cloud.submit_hardware_job(c, shots=100, confirm=True)
+
+   cloud.hardware_jobs()                        # 最近投入したジョブ
+   cloud.hardware_job(job["task_id"])           # 1件の状態
+   cloud.hardware_job_result(job["task_id"])    # 終わっていれば結果
+   cloud.cancel_hardware_job(job["task_id"])    # 待ち行列にいるうちなら取消
+
+``submit_hardware_job``\ は\ ``confirm=True``\ を必ず求めます。実機は実際に費用が
+かかり、アカウントの割り当ての範囲でしか動かないためです。書いたとおりの量子ビット
+番号を保ちたいときは\ ``preserve_layout=True``\ を渡してください（既定では
+サービス側が割り当て直します）。
+
+動いたかどうか分からないとき
+----------------------------
+
+通信の失敗が、いつも「実行されなかった」を意味するとは限りません。このサービスは
+Cloudflare の後ろにあり、524 は\ **応答が始まらないまま 100 秒ほど沈黙した**\ ときに
+出ます。これは「処理にかけてよい時間の上限」ではなく「沈黙の上限」です。要求自体は
+既に届いていて、しかも終わっている可能性があります。手元の待ち時間切れも同じです。
+
+この場合は素のエラーではなく :class:`~blueqat.cloud.CloudOutcomeUnknown`\ が
+上がるので、「起きなかった」と「起きたかどうか分からない」を区別できます。
+
+.. code-block:: python
+
+   try:
+       job = cloud.submit_hardware_job(c, shots=100, confirm=True)
+   except cloud.CloudOutcomeUnknown:
+       # そのまま投げ直さないでください。既に待ち行列にいるかもしれず、
+       # 実機ジョブの二重投入は枠と費用をもう一度使います。
+       for j in cloud.hardware_jobs()["jobs"]:
+           print(j["task_id"], j["status"])
+
+``CloudOutcomeUnknown``\ は\ ``RuntimeError``\ の子なので、既に
+``RuntimeError``\ を捕まえている書き方はそのまま動きます。接続を拒否された場合は
+従来どおり普通のエラーです。何も送られていないので、動いているはずがないからです。
+
 
 MCP連携
 -------

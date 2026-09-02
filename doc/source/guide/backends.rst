@@ -49,6 +49,31 @@ the full vector:
 
 Sampling uses inverse-CDF search, so there is no category-count limit.
 
+Noise applies to every entry point
+----------------------------------
+
+``noise=`` (and ``quasi_static=``, ``noise_scale=``) selects the density-matrix
+backend, whichever way the run is written:
+
+.. code-block:: python
+
+   c.run(noise=nm, shots=1000)
+   c.shots(1000, noise=nm)        # the same thing
+   c.probs(noise=nm)              # probabilities from the density matrix
+
+``statevector()`` and ``oneshot()`` raise instead: a noisy state has no
+statevector, and returning the noiseless one would be worse than an error.
+
+Mid-circuit measurement
+-----------------------
+
+A measurement collapses the state, so anything acting on that qubit afterwards
+sees a classical bit. Circuits where that happens are run shot by shot as
+quantum trajectories, collapsing where the measurement is, and the reported bit
+is the one the measurement produced -- not a value drawn from the final state
+after later gates have moved it. Measurements that nothing follows keep the
+fast single-pass path.
+
 Reproducible sampling
 ---------------------
 

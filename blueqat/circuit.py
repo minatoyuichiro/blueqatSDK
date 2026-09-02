@@ -148,21 +148,29 @@ class Circuit:
             ``'q0_first'``, where ``key[i]`` is qubit i, as cloud APIs report
             it. Keys are zero-padded to ``n_qubits`` in either order.
         """
-        from blueqat.backends import BACKENDS, DEFAULT_BACKEND_NAME
-        
-        if backend is None:
-            # Noise needs a density matrix, which the default backends do not carry;
-            # asking for noise is therefore also a choice of backend. Quasi-static
-            # noise counts too: its result is an average over frozen detunings,
-            # which is a mixture and so needs a density matrix as well.
-            noisy = (kwargs.get('noise') is not None
-                     or kwargs.get('quasi_static') is not None)
-            name = 'density' if noisy else DEFAULT_BACKEND_NAME
-            backend = self.__get_backend(name)
-        elif isinstance(backend, str):
-            backend = self.__get_backend(backend)
-            
-        return backend.run(self.ops, self.n_qubits, *args, **kwargs)
+        return self._resolve_backend(backend, kwargs).run(
+            self.ops, self.n_qubits, *args, **kwargs)
+
+    def _resolve_backend(self, backend: 'BackendUnion', kwargs: dict) -> 'Backend':
+        """The backend a call should go to, given what it was asked for.
+
+        Noise needs a density matrix, which the default backends do not carry, so
+        asking for noise is also a choice of backend. Quasi-static noise counts
+        too: its result is an average over frozen detunings, which is a mixture.
+
+        Every entry point routes through here. When only `run` did, the same
+        request written as `shots(...)` or `probs(...)` reached a backend that
+        does not know the argument and dropped it, returning a noiseless answer
+        with no error -- the failure this exists to prevent.
+        """
+        from blueqat.backends import DEFAULT_BACKEND_NAME
+
+        if backend is not None:
+            return self.__get_backend(backend) if isinstance(backend, str) else backend
+        noisy = (kwargs.get('noise') is not None
+                 or kwargs.get('quasi_static') is not None
+                 or kwargs.get('noise_scale') is not None)
+        return self.__get_backend('density' if noisy else DEFAULT_BACKEND_NAME)
 
     def to_qasm(self, output_prologue: bool = True) -> str:
         """Convert this circuit into an OpenQASM 2.0 program string."""
@@ -171,13 +179,9 @@ class Circuit:
 
     def statevector(self, backend: 'BackendUnion' = None, **kwargs) -> torch.Tensor:
         """Run the circuit and get a statevector as a PyTorch Tensor to keep gradients intact."""
-        from blueqat.backends import DEFAULT_BACKEND_NAME
         if kwargs.get('returns'):
             raise ValueError('Circuit.statevector has no argument `returns`.')
-        if backend is None:
-            backend = self.__get_backend(DEFAULT_BACKEND_NAME)
-        elif isinstance(backend, str):
-            backend = self.__get_backend(backend)
+        backend = self._resolve_backend(backend, kwargs)
 
         if hasattr(backend, 'statevector'):
             return backend.statevector(self.ops, self.n_qubits, **kwargs)
@@ -188,13 +192,9 @@ class Circuit:
 
         Accepts the same ``seed`` and ``bit_order`` arguments as
         :meth:`~blueqat.circuit.Circuit.run`."""
-        from blueqat.backends import DEFAULT_BACKEND_NAME
         if kwargs.get('returns'):
             raise ValueError('Circuit.shots has no argument `returns`.')
-        if backend is None:
-            backend = self.__get_backend(DEFAULT_BACKEND_NAME)
-        elif isinstance(backend, str):
-            backend = self.__get_backend(backend)
+        backend = self._resolve_backend(backend, kwargs)
 
         if hasattr(backend, 'shots'):
             return backend.shots(self.ops, self.n_qubits, shots=shots, **kwargs)
@@ -203,13 +203,9 @@ class Circuit:
     def oneshot(self, backend: 'BackendUnion' = None, **kwargs) -> Tuple[torch.Tensor, str]:
         """Run the circuit once and return the post-measurement statevector together
         with the single measured bitstring."""
-        from blueqat.backends import DEFAULT_BACKEND_NAME
         if kwargs.get('returns'):
             raise ValueError('Circuit.oneshot has no argument `returns`.')
-        if backend is None:
-            backend = self.__get_backend(DEFAULT_BACKEND_NAME)
-        elif isinstance(backend, str):
-            backend = self.__get_backend(backend)
+        backend = self._resolve_backend(backend, kwargs)
         vec, cnt = backend.run(self.ops, self.n_qubits, shots=1, returns='statevector_and_shots', **kwargs)
         return vec, next(iter(cnt))
 
@@ -261,9 +257,16 @@ class Circuit:
 
         Returns a tensor of length 2**len(qubits) where index bit j is the
         outcome of `qubits[j]` (the first listed qubit is the least-significant
-        bit, matching the SDK-wide convention). Differentiable."""
-        state = self.statevector(backend, **kwargs)
-        p = torch.abs(state) ** 2
+        bit, matching the SDK-wide convention). Differentiable.
+
+        Under noise there is no statevector to square; the probabilities are the
+        density matrix's diagonal, and are read from there."""
+        resolved = self._resolve_backend(backend, kwargs)
+        if getattr(resolved, 'returns_density_matrix', False):
+            rho = resolved.run(self.ops, self.n_qubits, **kwargs)
+            p = torch.diagonal(rho).real.clone()
+        else:
+            p = torch.abs(self.statevector(backend, **kwargs)) ** 2
         if qubits is None:
             return p
         keep = list(qubits)
@@ -448,6 +451,14 @@ class Circuit:
         reuse elsewhere in the circuit.
         """
         if pos is not None:
+            # A negative pos resolves later as an index from the end, so an
+            # ancilla silently lands on a data qubit -- and the automatic reset
+            # on leaving the block erases it. `append_block` already refuses
+            # negative offsets; this is the same rule.
+            if pos < 0:
+                raise ValueError(f"ancilla pos must be non-negative, got {pos}.")
+            if stop is not None and stop < pos:
+                raise ValueError(f"ancilla stop ({stop}) must not be below pos ({pos}).")
             indices = list(range(pos, stop if stop is not None else pos + n))
             self.n_qubits = max(self.n_qubits, (max(indices) + 1) if indices else 0)
         else:
