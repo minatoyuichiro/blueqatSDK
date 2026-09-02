@@ -135,21 +135,58 @@ def two_qubit_kak(matrix: torch.Tensor):
     return left, tuple(float(v) for v in angles), right, complex(phase)
 
 
+def _emit_interaction_cx(circuit: Circuit, angles: Tuple[float, float, float],
+                         low: int, high: int, atol: float) -> None:
+    """``exp(i(a XX + b YY + c ZZ))`` in at most four CX.
+
+    Under CX conjugation an Rx on one wire becomes an XX term and an Rz on the
+    other becomes a ZZ term, so a *single* CX sandwich carries both at once.
+    The three terms commute, so the interaction splits into (XX, ZZ) and (YY):
+    two sandwiches, four CX, against the six that three separate two-qubit
+    rotations compile to. YY is the odd one out because nothing in the sandwich
+    maps to it directly; conjugating the XX sandwich by S supplies it, since
+    ``S X S^H == Y``.
+
+    A gate whose interaction misses one group is cheaper still: anything with
+    only XX and ZZ content -- CZ, CX, ZZ, an Ising rotation -- costs two.
+    """
+    a, b, c = angles
+    if abs(a) > atol or abs(c) > atol:
+        circuit.cx[low, high]
+        if abs(a) > atol:
+            circuit.rx(-2.0 * a)[low]
+        if abs(c) > atol:
+            circuit.rz(-2.0 * c)[high]
+        circuit.cx[low, high]
+    if abs(b) > atol:
+        circuit.sdg[low].sdg[high]
+        circuit.cx[low, high].rx(-2.0 * b)[low].cx[low, high]
+        circuit.s[low].s[high]
+
+
 def decompose_two_qubit(matrix: torch.Tensor,
                         targets: Sequence[int] = (0, 1),
                         n_qubits: Optional[int] = None,
-                        atol: float = 1e-12) -> Circuit:
+                        atol: float = 1e-12,
+                        basis: str = 'rotations') -> Circuit:
     """A circuit implementing a 4x4 unitary, exactly, up to global phase.
 
     `targets` names the two qubits as ``(low, high)``: the matrix is read in
     blueqat's convention, where ``targets[0]`` is the least significant bit of a
     basis-state index.
 
-    Cost is three two-qubit rotations -- six CX once they are compiled -- and
-    fewer when the interaction is degenerate, since a canonical angle within
-    `atol` of zero contributes nothing and is dropped. A CZ, for instance, comes
-    back as a single ``rzz``.
+    With ``basis='rotations'`` (the default) the interaction comes out as three
+    two-qubit rotations -- six CX once they are compiled. ``basis='cx'`` emits
+    CX directly and needs only four, because one CX sandwich carries an XX and
+    a ZZ term at the same time; see :func:`_emit_interaction_cx`. Both are
+    exact.
+
+    Either way a canonical angle within `atol` of zero contributes nothing and
+    is dropped, so a degenerate interaction is cheaper: a CZ comes back as a
+    single ``rzz``, or as two CX.
     """
+    if basis not in ('rotations', 'cx'):
+        raise ValueError(f"basis must be 'rotations' or 'cx', got {basis!r}.")
     low, high = int(targets[0]), int(targets[1])
     if low == high:
         raise ValueError("the two targets must differ.")
@@ -169,10 +206,13 @@ def decompose_two_qubit(matrix: torch.Tensor,
     circuit = Circuit(width)
     circuit.mat1(first_high)[high]
     circuit.mat1(first_low)[low]
-    # rxx(t) is exp(-i t/2 XX), so exp(i a XX) is rxx(-2a).
-    for angle, name in ((a, 'rxx'), (b, 'ryy'), (c, 'rzz')):
-        if abs(angle) > atol:
-            getattr(circuit, name)(-2.0 * angle)[low, high]
+    if basis == 'cx':
+        _emit_interaction_cx(circuit, (a, b, c), low, high, atol)
+    else:
+        # rxx(t) is exp(-i t/2 XX), so exp(i a XX) is rxx(-2a).
+        for angle, name in ((a, 'rxx'), (b, 'ryy'), (c, 'rzz')):
+            if abs(angle) > atol:
+                getattr(circuit, name)(-2.0 * angle)[low, high]
     circuit.mat1(last_high)[high]
     circuit.mat1(last_low)[low]
     return circuit
@@ -460,7 +500,8 @@ def _uniformly_controlled(circuit: Circuit, kind: str, angles: Sequence[float],
 
 def decompose_unitary(matrix: torch.Tensor,
                       targets: Optional[Sequence[int]] = None,
-                      n_qubits: Optional[int] = None) -> Circuit:
+                      n_qubits: Optional[int] = None,
+                      basis: str = 'rotations') -> Circuit:
     """A circuit for an arbitrary ``2**n x 2**n`` unitary, exactly.
 
     The Quantum Shannon decomposition: split the matrix on its top qubit with a
@@ -468,10 +509,16 @@ def decompose_unitary(matrix: torch.Tensor,
     controlled rotation plus smaller unitaries, and recurse. The recursion stops
     at two qubits, where :func:`decompose_two_qubit` solves it in closed form.
 
+    `basis` is handed to the two-qubit step: ``'cx'`` emits CX directly and
+    costs four per block instead of six, which compounds here because the
+    recursion bottoms out in many blocks.
+
     Cost grows as ``4**n``; this is a correct construction, not an optimized
     one. For a single two-qubit block prefer :func:`synthesize_two_qubit`,
     which reaches the optimal three CX.
     """
+    if basis not in ('rotations', 'cx'):
+        raise ValueError(f"basis must be 'rotations' or 'cx', got {basis!r}.")
     matrix = torch.as_tensor(matrix, dtype=_C)
     size = matrix.shape[0]
     n = size.bit_length() - 1
@@ -486,11 +533,12 @@ def decompose_unitary(matrix: torch.Tensor,
     width = max(targets) + 1 if n_qubits is None else int(n_qubits)
 
     circuit = Circuit(width)
-    circuit.ops.extend(_shannon(matrix, list(targets), width))
+    circuit.ops.extend(_shannon(matrix, list(targets), width, basis))
     return circuit
 
 
-def _shannon(matrix: torch.Tensor, targets: Sequence[int], width: int) -> list:
+def _shannon(matrix: torch.Tensor, targets: Sequence[int], width: int,
+             basis: str = 'rotations') -> list:
     n = len(targets)
     if n == 1:
         circuit = Circuit(width)
@@ -498,7 +546,7 @@ def _shannon(matrix: torch.Tensor, targets: Sequence[int], width: int) -> list:
         return circuit.ops
     if n == 2:
         return decompose_two_qubit(matrix, targets=(targets[0], targets[1]),
-                                   n_qubits=width).ops
+                                   n_qubits=width, basis=basis).ops
 
     top, rest = targets[-1], list(targets[:-1])
     left_top, left_bottom, cosines, sines, right_top, right_bottom = cosine_sine(matrix)
@@ -507,13 +555,13 @@ def _shannon(matrix: torch.Tensor, targets: Sequence[int], width: int) -> list:
     def multiplexed(first, second):
         vectors, diagonal, other = _demultiplex(first, second)
         block: list = []
-        block += _shannon(other, rest, width)
+        block += _shannon(other, rest, width, basis)
         rotations = Circuit(width)
         _uniformly_controlled(rotations, 'rz',
                               [-2.0 * float(torch.angle(value)) for value in diagonal],
                               top, rest)
         block += rotations.ops
-        block += _shannon(vectors, rest, width)
+        block += _shannon(vectors, rest, width, basis)
         return block
 
     ops += multiplexed(right_top.conj().T, right_bottom.conj().T)

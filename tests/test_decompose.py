@@ -315,3 +315,89 @@ def test_the_two_paths_agree(without_scipy):
     left = torch.block_diag(l0, l1)
     right = torch.block_diag(r0, r1)
     assert torch.allclose(matrix, left @ middle @ right.conj().T, atol=1e-10)
+
+
+# --- emitting CX directly ---------------------------------------------------
+#
+# One CX sandwich carries an XX and a ZZ term at once, so the interaction needs
+# two sandwiches (four CX) rather than three separate two-qubit rotations (six).
+
+def _cx_cost(circuit):
+    """CX gates, counting each two-qubit rotation as the two it compiles to."""
+    return sum(2 if op.lowername in ('rxx', 'ryy', 'rzz') else 1
+               for op in circuit.ops if op.lowername in ('cx', 'rxx', 'ryy', 'rzz'))
+
+
+@pytest.mark.parametrize('seed', range(6))
+def test_cx_basis_is_exact(seed):
+    matrix = random_unitary(4, seed=400 + seed)
+    circuit = decompose_two_qubit(matrix, basis='cx')
+    assert _equal_up_to_phase(matrix, _unitary(circuit))
+    assert _cx_cost(circuit) == 4
+
+
+@pytest.mark.parametrize('build,cost', [
+    (lambda: Circuit(2), 0),                       # nothing to entangle
+    (lambda: Circuit(2).cx[0, 1], 2),              # XX and ZZ content only
+    (lambda: Circuit(2).cz[0, 1], 2),
+    (lambda: Circuit(2).zz[0, 1], 2),
+    (lambda: Circuit(2).swap[0, 1], 4),            # needs the YY sandwich too
+    (lambda: Circuit(2).iswap[0, 1], 4),
+])
+def test_cx_basis_costs_less_when_the_interaction_is_degenerate(build, cost):
+    matrix = _unitary(build())
+    circuit = decompose_two_qubit(matrix, basis='cx')
+    assert _equal_up_to_phase(matrix, _unitary(circuit))
+    assert _cx_cost(circuit) == cost
+
+
+def test_cx_basis_beats_rotations_and_agrees_with_it():
+    for seed in range(4):
+        matrix = random_unitary(4, seed=500 + seed)
+        rotations = decompose_two_qubit(matrix, basis='rotations')
+        direct = decompose_two_qubit(matrix, basis='cx')
+        assert _cx_cost(direct) < _cx_cost(rotations)
+        # Same operator, not merely both close to something.
+        assert _equal_up_to_phase(_unitary(rotations), _unitary(direct))
+
+
+def test_cx_basis_is_exact_not_fitted():
+    """The point of the closed form: machine precision, where the gradient fit
+    in synthesize_two_qubit reaches about 1e-7."""
+    matrix = random_unitary(4, seed=7)
+    got = _unitary(decompose_two_qubit(matrix, basis='cx'))
+    overlap = torch.trace(matrix.conj().T @ got)
+    aligned = got * (overlap / abs(overlap)).conj()
+    assert float((matrix - aligned).abs().max()) < 1e-13
+
+
+@pytest.mark.parametrize('targets,width', [((1, 0), 2), ((0, 2), 3), ((2, 1), 4)])
+def test_cx_basis_honors_targets_and_width(targets, width):
+    matrix = random_unitary(4, seed=11)
+    circuit = decompose_two_qubit(matrix, targets=targets, n_qubits=width, basis='cx')
+    assert circuit.n_qubits == width
+    reference = decompose_two_qubit(matrix, targets=targets, n_qubits=width)
+    assert _equal_up_to_phase(_unitary(reference), _unitary(circuit))
+
+
+@pytest.mark.parametrize('n', [2, 3, 4])
+def test_n_qubit_decomposition_in_the_cx_basis(n):
+    matrix = random_unitary(1 << n, seed=60 + n)
+    circuit = decompose_unitary(matrix, basis='cx')
+    assert _equal_up_to_phase(matrix, _unitary(circuit), atol=1e-9)
+    assert _cx_cost(circuit) < _cx_cost(decompose_unitary(matrix))
+
+
+def test_n_qubit_cx_basis_without_scipy(without_scipy):
+    matrix = random_unitary(8, seed=63)
+    circuit = decompose_unitary(matrix, basis='cx')
+    assert _equal_up_to_phase(matrix, _unitary(circuit), atol=1e-9)
+
+
+@pytest.mark.parametrize('call', [
+    lambda: decompose_two_qubit(random_unitary(4, seed=1), basis='nonsense'),
+    lambda: decompose_unitary(random_unitary(4, seed=1), basis='nonsense'),
+])
+def test_unknown_basis_is_rejected(call):
+    with pytest.raises(ValueError, match="basis must be"):
+        call()
