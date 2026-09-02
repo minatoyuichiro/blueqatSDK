@@ -60,10 +60,48 @@ Real quantum hardware
 
    cloud.hardware_status()         # near-real-time QPU status (public)
    cloud.hardware_qpus()           # available QPUs (authenticated)
-   cloud.submit_hardware_job(c, shots=100, confirm=True)
+   cloud.hardware_calibration()    # per-qubit error rates and coherence times
+   cloud.hardware_next_window()    # when submissions are next accepted
+   cloud.hardware_quote(shots=100, payer="me")   # cost, before committing
+
+   job = cloud.submit_hardware_job(c, shots=100, confirm=True)
+
+   cloud.hardware_jobs()                        # your recent submissions
+   cloud.hardware_job(job["task_id"])           # status of one
+   cloud.hardware_job_result(job["task_id"])    # counts, once finished
+   cloud.cancel_hardware_job(job["task_id"])    # while still queued
 
 ``submit_hardware_job`` requires ``confirm=True``: hardware runs cost real
-money and are subject to your account's quota.
+money and are subject to your account's quota. Pass ``preserve_layout=True``
+to keep your qubit indices as written instead of letting the service remap
+them.
+
+When you don't know whether it ran
+----------------------------------
+
+A network error is not always a failure. The service sits behind Cloudflare,
+whose 524 fires after about 100 seconds of *silence* from the origin -- that
+bounds how long a reply may take to start, not how long the work may take. The
+request has already arrived, and quite possibly finished. The same is true of a
+client-side timeout.
+
+Those cases raise :class:`~blueqat.cloud.CloudOutcomeUnknown` rather than a
+plain error, so you can tell "this did not happen" from "I do not know whether
+this happened":
+
+.. code-block:: python
+
+   try:
+       job = cloud.submit_hardware_job(c, shots=100, confirm=True)
+   except cloud.CloudOutcomeUnknown:
+       # Do NOT resubmit blindly -- it may already be queued, and a duplicate
+       # hardware job spends another slot and more money.
+       for j in cloud.hardware_jobs()["jobs"]:
+           print(j["task_id"], j["status"])
+
+``CloudOutcomeUnknown`` subclasses ``RuntimeError``, so code that already
+catches ``RuntimeError`` keeps working unchanged. A refused connection stays an
+ordinary error: nothing was sent, so nothing can have run.
 
 MCP integration
 ---------------
