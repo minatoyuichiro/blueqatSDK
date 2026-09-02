@@ -448,9 +448,13 @@ def test_task_id_is_escaped_into_the_path():
 #
 # Every other test here goes through FakeTransport, which never builds a real
 # request -- so nothing pinned the headers. The service sits behind Cloudflare,
-# which rejects urllib's default "Python-urllib/x.y" signature with a 403
-# *before the request reaches the service at all*. Dropping the User-Agent in a
-# tidy-up would break every call against the live endpoint while the whole
+# which rejects the "Python-urllib/x.y" signature with a 403 *before the
+# request reaches the service at all*. Measured one variable at a time against
+# the live endpoint: no header at all is 403, because urllib then supplies that
+# signature itself; an empty agent is 200; a one-character agent is 200. So the
+# rule is about that string, not about naming oneself -- but naming oneself is
+# how you stay clear of it, and it is what the SDK does. Dropping the header in
+# a tidy-up would break every call against the live endpoint while the whole
 # suite stayed green, and the failure would read as "the service is down".
 
 def _captured_request(method='GET', path='/health', payload=None, api_key=None):
@@ -480,7 +484,7 @@ def _captured_request(method='GET', path='/health', payload=None, api_key=None):
 def test_requests_name_a_user_agent():
     seen = _captured_request()
     agent = seen['request'].get_header('User-agent')
-    assert agent, "no User-Agent: Cloudflare answers urllib's default with 403"
+    assert agent, "no User-Agent set: urllib would then send Python-urllib/x.y, which Cloudflare answers with 403"
     assert not agent.lower().startswith('python-urllib')
     assert 'blueqat' in agent.lower()
 
@@ -509,3 +513,70 @@ def test_a_payload_is_json_and_sets_its_content_type():
 
 def test_requests_carry_the_timeout():
     assert _captured_request()['timeout'] == cloud.REQUEST_TIMEOUT
+
+
+# Both bodies below were captured from the live endpoint, not invented.
+# Cloudflare content-negotiates its own errors, and the SDK always sends
+# `Accept: application/json`, so it sees the JSON one -- a fabricated
+# plain-text body made an earlier version of this test pass while the real
+# service still produced an unhelpful message.
+CLOUDFLARE_TEXT = b'error code: 1010\n'
+CLOUDFLARE_JSON = json.dumps({
+    "type": "https://developers.cloudflare.com/support/troubleshooting/"
+            "http-status-codes/cloudflare-1xxx-errors/error-1010/",
+    "title": "Error 1010: Access denied",
+    "status": 403,
+    "detail": "The site owner has blocked access based on your browser's signature.",
+    "error_code": 1010,
+    "error_name": "browser_signature_banned",
+    "error_category": "access_denied",
+    "cloudflare_error": True,
+    "retryable": False,
+}).encode()
+
+
+def _raise_403(body):
+    import io
+    import urllib.error
+
+    def transport(*args, **kwargs):
+        raise urllib.error.HTTPError(
+            'https://qapi.blueqat.app/v1/health', 403, 'Forbidden', {},
+            io.BytesIO(body))
+    return transport
+
+
+@pytest.mark.parametrize('body', [CLOUDFLARE_TEXT, CLOUDFLARE_JSON])
+def test_a_cloudflare_block_is_not_reported_as_a_permission_problem(body, monkeypatch):
+    """A 403 from Cloudflare means the request never reached the service, so it
+    says nothing about the key -- which is exactly what a bare 403 invites you
+    to go and check."""
+    import urllib.request
+    monkeypatch.setattr(urllib.request, 'urlopen', _raise_403(body))
+    with pytest.raises(RuntimeError) as exc:
+        cloud._http_transport('GET', '/health', None, 'k', cloud.DEFAULT_ENDPOINT)
+    message = str(exc.value)
+    assert 'Cloudflare' in message
+    assert 'not an authentication or permission problem' in message
+    assert 'User-Agent' in message
+    assert not isinstance(exc.value, cloud.CloudOutcomeUnknown)
+
+
+def test_an_ordinary_403_still_reads_as_one():
+    import io
+    import urllib.error
+    import urllib.request
+
+    def transport(*args, **kwargs):
+        raise urllib.error.HTTPError(
+            'https://qapi.blueqat.app/v1/x', 403, 'Forbidden', {},
+            io.BytesIO(json.dumps({'detail': 'quota exceeded'}).encode()))
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(urllib.request, 'urlopen', transport)
+    try:
+        with pytest.raises(RuntimeError, match='quota exceeded') as exc:
+            cloud._http_transport('GET', '/x', None, 'k', cloud.DEFAULT_ENDPOINT)
+    finally:
+        monkeypatch.undo()
+    assert 'Cloudflare' not in str(exc.value)

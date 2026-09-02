@@ -210,13 +210,20 @@ def _http_transport(method: str, path: str, payload: Optional[dict],
             return json.loads(resp.read().decode('utf-8'))
     except urllib.error.HTTPError as e:
         try:
-            detail = json.loads(e.read().decode('utf-8')).get('detail', '')
+            body = e.read().decode('utf-8', 'replace')
         except Exception:
-            detail = ''
-        if e.code == 401:
-            raise RuntimeError(
-                "Blueqat cloud rejected the API key (401). "
-                f"{detail or 'Get a key at https://mcp.blueqat.app/login.'}") from None
+            body = ''
+        try:
+            payload = json.loads(body)
+            detail = payload.get('detail', '') if isinstance(payload, dict) else ''
+        except Exception:
+            payload, detail = {}, ''
+        # Cloudflare content-negotiates its own errors: plain text by default,
+        # JSON when the request asks for JSON, which this one always does. So
+        # check both shapes rather than the one that happens to show up in a
+        # terminal.
+        from_cloudflare = (bool(payload.get('cloudflare_error'))
+                           or 'error code: 1010' in body)
         if e.code in GATEWAY_TIMEOUTS:
             raise CloudOutcomeUnknown(
                 f"The gateway stopped waiting for the Blueqat cloud after "
@@ -227,6 +234,28 @@ def _http_transport(method: str, path: str, payload: Optional[dict],
                 f"your recent submissions -- especially for a hardware job, "
                 f"where resubmitting spends another slot and more money."
                 + (f" {detail}" if detail else "")) from None
+        if from_cloudflare:
+            # The request never reached the service, so this says nothing about
+            # the key -- which is the reading a bare 403 invites, and it sends
+            # people to the wrong place. Error 1010 in particular is the
+            # User-Agent being refused: urllib's default `Python-urllib/x.y` is
+            # on the list, while an empty or arbitrary agent is not, so it is
+            # that string specifically rather than a missing header.
+            reason = payload.get('error_name') or payload.get('title') or ''
+            raise RuntimeError(
+                f"Blocked by Cloudflare before reaching the Blueqat cloud "
+                f"({e.code}{f', {reason}' if reason else ''}). This is not an "
+                f"authentication or permission problem: your API key was never "
+                f"seen. "
+                + ("The request's User-Agent was refused -- blueqat sets its "
+                   "own, so something has replaced or stripped the header. "
+                   if payload.get('error_code') == 1010 or 'error code: 1010' in body
+                   else "")
+                + (detail or body[:200]).strip()) from None
+        if e.code == 401:
+            raise RuntimeError(
+                "Blueqat cloud rejected the API key (401). "
+                f"{detail or 'Get a key at https://mcp.blueqat.app/login.'}") from None
         raise RuntimeError(f"Blueqat cloud error {e.code}: {detail or e.reason}") from None
     except socket.timeout:
         raise CloudOutcomeUnknown(
