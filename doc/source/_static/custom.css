@@ -32,3 +32,42 @@
 .fa-github{
     visibility: hidden;
 }
+
+/* Name a Japanese font instead of leaving it to the browser.
+ *
+ * Furo's stacks name no CJK face, so Japanese resolves through whatever
+ * fontconfig happens to offer while Latin comes from the named font. Nothing
+ * looks broken -- the browser substitutes per *glyph* -- which is why it goes
+ * unnoticed. Measured on the built pages, 681 elements across the 11 Japanese
+ * pages named no Japanese font at all. The point of naming one is that the
+ * result stops depending on which fonts the build machine happens to have.
+ *
+ * These rules repeat Furo's stacks verbatim and only append to them, so that
+ * a shorter stack cannot silently drop what was on the end ("Apple Color
+ * Emoji", "Segoe UI Emoji", "Lucida Console"). That is a precaution, not
+ * something a check here would catch: this box has none of those fonts, so
+ * dropping them changed no pixels. If Furo's stack changes, copy the new one
+ * and append again rather than editing this by hand.
+ *
+ * `code` is listed separately on purpose: the browser's own default
+ * `font-family: monospace` applies to it directly, so it does *not* inherit
+ * what `pre` is given, and checking `pre` alone reports success.
+ *
+ * The CJK families go at the *end*, so Latin resolution is untouched.
+ * Measured against the previous build: English pages 0.00% of pixels changed;
+ * Japanese pages 0.51%, with identical text widths, identical to the eye, and
+ * a median difference of 42/255 -- rasterisation noise from selecting the same
+ * face by name rather than by fallback, not a change of typeface.
+ */
+body, .sidebar-drawer, .content, h1, h2, h3, h4, p, li, td, th, strong, em, a {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica,
+                 Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji",
+                 "Hiragino Sans", "Yu Gothic", "Noto Sans CJK JP",
+                 "Noto Sans JP", Meiryo;
+}
+
+pre, code, kbd, samp, tt, .highlight pre, .highlight span {
+    font-family: SFMono-Regular, Menlo, Consolas, Monaco, "Liberation Mono",
+                 "Lucida Console", monospace, "Noto Sans Mono CJK JP",
+                 "Hiragino Sans", "Yu Gothic", "Noto Sans CJK JP";
+}

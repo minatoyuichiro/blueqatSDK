@@ -44,6 +44,8 @@ intersphinx_mapping = {
 html_theme = 'furo'
 html_title = f'blueqat {__version__}'
 html_static_path = ['_static']
+# _static alone does not load anything; the file has to be named.
+html_css_files = ['custom.css']
 html_theme_options = {
     'source_repository': 'https://github.com/blueqat/blueqatSDK/',
     'source_branch': 'main',
