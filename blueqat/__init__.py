@@ -26,9 +26,29 @@ from blueqat.backends.backendbase import Backend, get_backend, register_backend
 from blueqat.backends.torch_backend import TorchBackend
 from blueqat.backends.draw_backend import DrawCircuit
 
+#: Which end of a counts key is qubit 0. blueqat writes ``"q0_last"``: the
+#: *rightmost* character is qubit 0, so ``Circuit(3).x[0].m[:].run(shots=1)``
+#: gives ``{'001': 1}``.
+#:
+#: It is exported because it has not always been this. blueqat 2.0.4's numpy
+#: and numba backends put qubit 0 at the *left*, giving ``{'100': 1}`` for the
+#: same circuit -- the mirror image, with no error and no warning. Code that
+#: reads a bitstring is therefore version-dependent in a way nothing announces,
+#: and both versions call themselves blueqat.
+#:
+#: So a caller who cares can say so in one line, and fail loudly on a version
+#: that would answer backwards, since 2.0.4 has no such attribute::
+#:
+#:     assert blueqat.BIT_ORDER == "q0_last"
+#:
+#: `blueqat.backends.backendbase.apply_bit_order` converts, for talking to
+#: services that use the other convention.
+BIT_ORDER: str = "q0_last"
+
 # 公開するシンボルを明示的に指定（テスト環境の検出をより確実にします）
 __all__ = [
     "__version__",
+    "BIT_ORDER",
     "Circuit",
     "BlueqatGlobalSetting",
     "Gate",

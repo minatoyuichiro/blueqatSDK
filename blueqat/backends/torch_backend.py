@@ -135,6 +135,51 @@ class TorchBackendContext:
                     self.tensor_indices.append([i])
 
 
+#: How large an intermediate has to get before it is worth mentioning. The
+#: failure this guards against is the kernel killing the process, so the
+#: threshold is about memory rather than about being a multiple of anything: a
+#: contraction four times the size of a 16-qubit state vector is still four
+#: megabytes, and warning about it would be noise.
+CONTRACTION_WARN_BYTES = 1 << 30            # 1 GiB
+
+
+def _check_contraction_cost(contract_args, n_qubits: int, where: str) -> None:
+    """Warn when contracting the network will cost more than the state vector.
+
+    The tensor-network mode's cost depends on how the circuit is wired, not on
+    its qubit count, so it can quietly need far more memory than the dense
+    vector it is avoiding. A circuit that touches one register at both the
+    start and the end has been measured taking 30 GB at 19 qubits and being
+    killed by the kernel -- which tells the caller nothing at all, since a
+    SIGKILL leaves no traceback.
+
+    `opt_einsum` can price the contraction before running it, so this says so
+    first. The comparison is exact rather than a heuristic: if the largest
+    intermediate exceeds 2**n elements, the dense vector is smaller than
+    something this contraction has to build anyway, and `backend='statevector'`
+    is strictly better.
+    """
+    if n_qubits <= 0 or n_qubits > 28:
+        return
+    try:
+        _, info = oe.contract_path(*contract_args)
+        largest = float(info.largest_intermediate)
+    except Exception:
+        return                      # pricing is best-effort; never block the run
+    dense = float(1 << n_qubits)
+    if largest <= dense or largest * 16 <= CONTRACTION_WARN_BYTES:
+        return
+    warnings.warn(
+        f"the tensor-network contraction for {where} builds an intermediate of "
+        f"{largest:.3g} elements ({largest * 16 / 2**30:.1f} GiB at complex128), "
+        f"against {dense:.3g} for the full state vector of {n_qubits} qubits. "
+        f"This circuit's connectivity makes 'tensornet' more expensive than "
+        f"'statevector', not less; pass backend='statevector' to run it in "
+        f"{dense * 16 / 2**20:.1f} MiB. Large contractions are killed by the "
+        f"kernel without a traceback, so this warning may be the only notice.",
+        ResourceWarning, stacklevel=3)
+
+
 class TorchBackend(Backend):
     """Unified PyTorch simulator backend supporting Autograd optimization."""
 
@@ -647,6 +692,7 @@ class TorchBackend(Backend):
                 contract_args.append([ctx.current_qubit_axis[i]])
 
             contract_args.append([])
+            _check_contraction_cost(contract_args, n_qubits, "an amplitude")
             result_tensor = oe.contract(*contract_args, backend="torch")
             return result_tensor
 
@@ -671,7 +717,8 @@ class TorchBackend(Backend):
                     
                 out_indices = [ctx.current_qubit_axis[i] for i in range(n_qubits)]
                 contract_args.append(out_indices)
-                
+
+                _check_contraction_cost(contract_args, n_qubits, "the full state vector")
                 current_tensor = oe.contract(*contract_args, backend="torch")
                 final_permute = [out_indices.index(ctx.current_qubit_axis[i]) for i in range(n_qubits)]
                 flattened_state = current_tensor.permute(tuple(final_permute)).reshape(-1)

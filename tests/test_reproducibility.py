@@ -262,3 +262,37 @@ def test_vqe_seed_reseeds_a_seedable_sampler():
     sampler.set_seed(5)
     assert sampler(c, range(3)) == first
     assert vqe.sampler is sampler
+
+
+# --- which end of a counts key is qubit 0 ----------------------------------
+#
+# blueqat 2.0.4's numpy and numba backends put qubit 0 at the *left*, giving
+# '100' where this gives '001' for the same circuit -- the mirror image, with
+# no error and no warning. Both versions call themselves blueqat, so code that
+# reads a bitstring is version-dependent in a way nothing announces. The
+# convention is exported so a caller can assert it and fail loudly on a version
+# that would answer backwards.
+
+def test_qubit_zero_is_the_last_character():
+    import blueqat
+    circuit = Circuit(3)
+    circuit.x[0]
+    assert dict(circuit.m[:].run(shots=1)) == {'001': 1}
+    assert blueqat.BIT_ORDER == 'q0_last'
+
+
+def test_every_backend_agrees_on_the_bit_order():
+    """Choosing a backend must not change which end is which -- that is exactly
+    the failure being guarded against."""
+    import blueqat
+    for backend in ('statevector', 'tensornet'):
+        circuit = Circuit(3)
+        circuit.x[0]
+        assert dict(circuit.m[:].run(backend=backend, shots=1)) == {'001': 1}, backend
+    assert blueqat.BIT_ORDER == 'q0_last'
+
+
+def test_the_convention_is_exported_so_a_guard_is_one_line():
+    import blueqat
+    assert 'BIT_ORDER' in blueqat.__all__
+    assert blueqat.BIT_ORDER in ('q0_last', 'q0_first')
