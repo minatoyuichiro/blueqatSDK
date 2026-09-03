@@ -182,27 +182,35 @@ def look_alike_characters(text: str) -> Dict[str, str]:
     return out
 
 
-#: Look-alikes that are damage from extracting text, never an authored choice.
-#: A reader seeing one is already looking at something broken, so these are the
-#: ones it is safe to repair in the stored text itself. Counted over each
-#: range, the share NFKC repairs:
+#: The one range whose members can be called damage on sight. Their Unicode
+#: names say what they are -- KANGXI RADICAL CHILD, KANGXI RADICAL TALL -- so a
+#: character from a radical table appearing in running prose is not something
+#: anyone chose. All 214 normalize onto an ordinary ideograph.
 #:
-#:     Kangxi radicals          U+2F00-2FD5   214 of 214   100%
-#:     CJK compatibility ideos  U+F900-FAFF   460 of 472  97.5%
-#:
-#: The CJK radicals supplement, U+2E80-2EF3, looks like it belongs here and
-#: does not: 2 of its 115 characters change under NFKC, so including it means
-#: reporting things this cannot repair.
+#: ⚠ Even here, "safe to repair in stored text" depends on where the text came
+#: from. Extracted from a PDF, one of these is an accident. Typed by a person
+#: or produced by a model, it is what they entered, and rewriting it is
+#: rewriting them. The character alone does not settle it.
 EXTRACTION_DAMAGE_RANGES = (
     (0x2F00, 0x2FD5),      # Kangxi radicals
-    (0xF900, 0xFAFF),      # CJK compatibility ideographs
 )
 
-#: Look-alikes that may be exactly what someone meant to write. Full-width
-#: letters are the registered form of some company names and appear in
-#: quotations that must not be altered; half-width kana is a presentation
-#: choice. Normalize these into a *search index*, never in the stored text.
+#: Look-alikes that may be exactly what someone meant. Normalize these into a
+#: *search index*, never in the stored text.
+#:
+#: The compatibility ideographs are the trap. Their names say nothing --
+#: CJK COMPATIBILITY IDEOGRAPH-FA10 -- and they normalize onto 塚, 晴 and 祥,
+#: which is to say onto characters that appear in people's names. A document
+#: carrying one may be spelling somebody's name correctly, and repairing the
+#: stored text would spell it wrong.
+#:
+#: Full-width letters are the registered form of some company names and appear
+#: in quotations that must not be altered; half-width kana is a presentation
+#: choice. The three full-width intervals are listed separately on purpose:
+#: FF10-FF5A as one span would swallow the full-width colon, question mark and
+#: brackets, which are ordinary Japanese punctuation.
 PRESENTATION_RANGES = (
+    (0xF900, 0xFAFF),      # CJK compatibility ideographs
     (0xFF10, 0xFF19),      # full-width 0-9
     (0xFF21, 0xFF3A),      # full-width A-Z
     (0xFF41, 0xFF5A),      # full-width a-z
@@ -210,7 +218,7 @@ PRESENTATION_RANGES = (
 )
 
 #: Both, which is what a *program* cares about: QASM is ASCII by definition, so
-#: the distinction between damage and intent does not arise inside one.
+#: the question of whether a character was intended does not arise inside one.
 LOOK_ALIKE_RANGES = EXTRACTION_DAMAGE_RANGES + PRESENTATION_RANGES
 
 
@@ -227,13 +235,15 @@ def _in_ranges(text: str, ranges, repairable: bool = True) -> Dict[str, str]:
 
 
 def extraction_damage(text: str) -> Dict[str, str]:
-    """Look-alikes that got there by accident, and their repair.
+    """Kangxi radicals, which say in their own names that they are misplaced.
 
-    Kangxi radicals and compatibility ideographs come from extracting text, not
-    from anyone typing them: U+2F26 renders exactly like U+5B50 and is a
-    different character, so a document carrying them cannot be searched for its
-    own words. Because nobody chose them, these are safe to fix in the stored
-    text -- quoting and display get better too.
+    U+2F26 renders exactly like U+5B50 and is a different character, so a
+    document carrying it cannot be searched for its own words.
+
+    ⚠ Whether repairing the stored text is right still depends on where the
+    text came from: extracted from a document, one of these is an accident;
+    typed by a person or emitted by a model, it is their input. Normalizing a
+    search index is always safe and achieves the searching either way.
     """
     return _in_ranges(text, EXTRACTION_DAMAGE_RANGES)
 
@@ -241,11 +251,13 @@ def extraction_damage(text: str) -> Dict[str, str]:
 def presentation_variants(text: str) -> Dict[str, str]:
     """Look-alikes that may be deliberate. Normalize an index, not the text.
 
-    Full-width letters are the registered form of some company names and appear
-    inside quotations that must stay as they were; half-width kana is a
-    presentation choice. Nothing here can tell an intentional one from an
-    accident, so rewriting the stored text changes names and misquotes sources.
-    Normalize both the index and the query instead, and leave the text alone.
+    Compatibility ideographs normalize onto characters that appear in people's
+    names -- U+FA10, U+FA12 and U+FA1A onto 塚, 晴 and 祥 -- so a document
+    carrying one may be spelling a name correctly. Full-width letters are the
+    registered form of some company names and appear inside quotations. Nothing
+    here can tell an intentional one from an accident, so rewriting the stored
+    text changes names and misquotes sources. Normalize both the index and the
+    query instead, and leave the text as it was written.
     """
     return _in_ranges(text, PRESENTATION_RANGES)
 
@@ -272,6 +284,11 @@ def unfixable_lookalikes(text: str) -> Dict[str, str]:
     and U+5D0E stay different after NFKC on both sides. Variant forms of a
     personal name are the usual way to meet them, and they need a different
     answer entirely.
+
+    ⚠ These are not the whole of the problem, only the part that is in range.
+    Ordinary variant ideographs -- U+9AD9 against U+9AD8, say -- are not
+    compatibility characters at all and no normalization touches them. Matching
+    people by name does not close either way; matching them by identifier does.
 
     Returned as ``{character: itself}`` so that "found it" and "fixed it" stay
     distinguishable: calling a normalization pass a resolution here is how the

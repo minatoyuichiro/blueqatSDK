@@ -171,3 +171,39 @@ def test_qasm_itself_is_stricter_than_prose():
     rather than only the ones that are wrong anywhere."""
     with pytest.raises(ValueError, match='look like ASCII but are not'):
         from_qasm(QASM_HEAD + 'rx（0.5） q[0];')    # full-width brackets only
+
+
+def test_compatibility_ideographs_are_not_safe_to_repair_in_stored_text():
+    """They normalize onto characters that appear in people's names, so a
+    document carrying one may be spelling a name correctly.
+
+    An earlier version put them with the Kangxi radicals as "extraction
+    damage". The names tell the difference: a Kangxi radical says what it is,
+    while U+FA10 is only CJK COMPATIBILITY IDEOGRAPH-FA10 and normalizes onto
+    a character used in ordinary Japanese surnames."""
+    import unicodedata
+    from blueqat.circuit_funcs.qasm_parser import (extraction_damage,
+                                                   presentation_variants)
+    for point in (0xFA10, 0xFA12, 0xFA1A):
+        ch = chr(point)
+        assert unicodedata.name(ch).startswith('CJK COMPATIBILITY IDEOGRAPH')
+        assert extraction_damage(ch) == {}          # not repairable in place
+        assert presentation_variants(ch)            # index it instead
+
+
+def test_a_kangxi_radical_says_what_it_is_in_its_own_name():
+    """Which is the whole reason it can be called damage on sight."""
+    import unicodedata
+    from blueqat.circuit_funcs.qasm_parser import extraction_damage
+    for point in (0x2F26, 0x2FBC, 0x2F09):
+        ch = chr(point)
+        assert unicodedata.name(ch).startswith('KANGXI RADICAL')
+        assert extraction_damage(ch)
+
+
+def test_full_width_punctuation_is_outside_every_range():
+    """FF10-FF5A written as one span would swallow the full-width colon,
+    question mark and brackets, which are ordinary Japanese punctuation."""
+    from blueqat.circuit_funcs.qasm_parser import always_wrong_characters
+    for point in (0xFF1A, 0xFF1F, 0xFF20, 0xFF3B, 0xFF3D, 0xFF40):
+        assert always_wrong_characters(chr(point)) == {}, hex(point)
