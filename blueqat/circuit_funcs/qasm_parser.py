@@ -161,7 +161,15 @@ def look_alike_characters(text: str) -> Dict[str, str]:
     where ``子`` (U+5B50) and ``⼦`` (U+2F26) are indistinguishable on screen. A
     program carrying them fails to parse for a reason nobody can see by looking.
 
-    Returns ``{character: what it normalizes to}`` for each distinct offender.
+    Returns ``{character: what it normalizes to}`` for each distinct
+    character NFKC would change.
+
+    ⚠ That is a wide net, and using it as a "this text is damaged" test gives
+    false positives on perfectly good Japanese. Full-width brackets and colons
+    are correct typography; NFKC also turns ``①`` into ``1``, ``㎡`` into
+    ``m2``, ``Ⅳ`` into ``IV`` and ``…`` into ``...``, none of which is a
+    repair. Use `always_wrong_characters` to ask whether something is broken;
+    use this one to describe what is there.
     """
     import unicodedata
     out: Dict[str, str] = {}
@@ -171,6 +179,41 @@ def look_alike_characters(text: str) -> Dict[str, str]:
         replacement = unicodedata.normalize('NFKC', ch)
         if replacement != ch:
             out[ch] = replacement
+    return out
+
+
+#: Ranges that are always a mistake in text meant to be read or matched: the
+#: 214 Kangxi radicals and the CJK radicals supplement, which duplicate
+#: ordinary ideographs, and full-width Latin letters and digits, which
+#: duplicate ASCII. Full-width *punctuation* is deliberately not here -- it is
+#: correct Japanese typography, and flagging it is what turns a real finding
+#: into a wave of false alarms.
+LOOK_ALIKE_RANGES = (
+    (0x2F00, 0x2FD5),      # Kangxi radicals
+    (0x2E80, 0x2EF3),      # CJK radicals supplement
+    (0xFF21, 0xFF3A),      # full-width A-Z
+    (0xFF41, 0xFF5A),      # full-width a-z
+    (0xFF10, 0xFF19),      # full-width 0-9
+)
+
+
+def always_wrong_characters(text: str) -> Dict[str, str]:
+    """Look-alikes that are a mistake wherever they appear.
+
+    A subset of `look_alike_characters`, restricted to the ranges that
+    duplicate an ordinary character with no typographic role of their own. This
+    is the one to use as a check: it catches the Kangxi radical ``⼦`` (U+2F26)
+    masquerading as ``子`` (U+5B50), and full-width ``ＦＡＱ`` that will not
+    match ``FAQ``, while leaving ``（``, ``①`` and ``㎡`` alone.
+
+    Note that a QASM program is a stricter case: it is ASCII by definition, so
+    `from_qasm` reports every look-alike rather than only these.
+    """
+    import unicodedata
+    out: Dict[str, str] = {}
+    for ch in text:
+        if any(low <= ord(ch) <= high for low, high in LOOK_ALIKE_RANGES):
+            out[ch] = unicodedata.normalize('NFKC', ch)
     return out
 
 
