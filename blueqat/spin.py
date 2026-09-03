@@ -302,14 +302,19 @@ def uniform_correction_applies(delays: Sequence[int], qubit: int = 0,
     ground.
 
     Returns the fraction, the verdict, and the reason for it. Suitable as a
-    `HardwareEvaluation(before_submit=...)` hook, though on a device it is a
-    characterization run of its own and costs what one costs.
+    `HardwareEvaluation(before_submit=...)` hook.
 
-    ⚠ It answers about the mechanism, not about the arithmetic. A separate
-    failure is that the residual is not uniform at all but a product
-    distribution with the correlations gone; `blueqat.hardware.noise_shape`
-    tests for that, from the measurement itself, at no extra cost. The two are
-    independent and both worth reading.
+    ⚠ On a device this is a characterization run of its own: a billed job at
+    the usual rate, needing the same approval as any other hardware
+    submission, and not something to schedule automatically on a caller's
+    behalf. Against a simulator it is free.
+
+    ⚠ It answers about the mechanism, and that is only one of the two premises
+    a uniform correction rests on. The other is that what remains is uniform
+    rather than merely uncorrelated -- a product of its own marginals can sit
+    far from uniform, and measured hardware output did. Both must hold;
+    `blueqat.hardware.noise_shape` tests the second, from the measurement in
+    hand and at no cost. Neither check implies the other.
     """
     fraction = refocusable_fraction(delays, qubit=qubit, n_qubits=n_qubits,
                                     **run_kwargs)

@@ -287,16 +287,24 @@ def remove_uniform(probs: Dict[Tuple[int, ...], float], n_outcomes: int,
     at 256 shots that is about ±0.04, which can exceed what the correction
     buys.
 
-    Before any of that, there is a question of whether the model applies at
-    all, and an echo answers it. Every estimate above assumes the error is a
-    *channel* -- memoryless, stochastic, redrawn each shot. A quasi-static
-    offset is none of those, and it is what an echo refocuses. If a Hahn echo
-    recovers the coherence, the dominant error is not a channel and an `f`
-    estimated as though it were will not describe it:
-    `blueqat.spin.uniform_correction_applies` runs that check. `noise_shape`
-    tests a different premise -- whether what remains is uniform at all, rather
-    than a product distribution with the correlations gone -- from the
-    measurement itself and at no extra cost. The two are independent.
+    Before any of that, the model has two premises, and both have to hold.
+    They are separate questions and neither implies the other:
+
+    1. **The error is a channel** -- memoryless, stochastic, redrawn each shot.
+       A quasi-static offset is none of those, and it is what an echo
+       refocuses, so an echo answers this:
+       `blueqat.spin.uniform_correction_applies`. ⚠ On hardware that is a
+       characterization run of its own -- a billed job, needing the same
+       approval as any other.
+    2. **What remains is uniform** -- not merely uncorrelated. `noise_shape`
+       answers this from the measurement in hand, at no extra cost.
+
+    A distribution can be a product of its own marginals and still be far from
+    uniform: independent bits at p = 0.3 sit 0.284 away in total variation.
+    Measured hardware output was 0.0395 from the product of its marginals,
+    which is the correlations having gone rather than a uniform background
+    having arrived. Passing the first check and failing the second still leaves
+    the correction describing something that is not happening.
     """
     if not 0.0 < rate <= 1.0:
         raise ValueError(f"rate must be in (0, 1] -- it is the surviving signal "
