@@ -252,3 +252,76 @@ def refocusing_gain(delays: Sequence[int], qubit: int = 0,
     mean_echo = sum(echo.values()) / len(echo)
     return {'ramsey': mean_ramsey, 'echo': mean_echo,
             'gain': mean_echo - mean_ramsey}
+
+def refocusable_fraction(delays: Sequence[int], qubit: int = 0,
+                         n_qubits: Optional[int] = None, n_pulses: int = 1,
+                         **run_kwargs) -> float:
+    """How much of the lost coherence an echo brings back, as a fraction.
+
+    ``(echo - ramsey) / (1 - ramsey)``: 1 when refocusing recovers everything
+    the Ramsey lost, 0 when it recovers nothing. Clamped to [0, 1], since an
+    echo that comes out worse than its Ramsey has recovered a negative amount
+    of nothing -- it has simply paid for one more pulse.
+
+    Returns 0.0 when the Ramsey did not decay, because then there is nothing to
+    recover and the ratio is meaningless rather than large.
+    """
+    both = refocusing_gain(delays, qubit=qubit, n_qubits=n_qubits,
+                           n_pulses=n_pulses, **run_kwargs)
+    lost = 1.0 - both['ramsey']
+    if lost <= 1e-9:
+        return 0.0
+    return min(1.0, max(0.0, (both['echo'] - both['ramsey']) / lost))
+
+
+#: Above this share of refocusable error, a depolarizing correction is not
+#: describing the dominant mechanism. The value is a judgement, not a
+#: measurement: at 0.3 a third of the damage is something a channel cannot
+#: represent, which is already enough for a correction derived from one to be
+#: reporting a number it has not earned.
+REFOCUSABLE_LIMIT = 0.3
+
+
+def uniform_correction_applies(delays: Sequence[int], qubit: int = 0,
+                               n_qubits: Optional[int] = None,
+                               **run_kwargs) -> Dict[str, object]:
+    """Whether a uniform-noise (depolarizing) correction can be trusted here.
+
+    `blueqat.hardware.remove_uniform` divides out a uniform background of
+    weight ``1 - f``, and the ways of estimating `f` -- a mirror circuit above
+    all -- assume the error is a *channel*: memoryless, stochastic, the same on
+    every shot. A quasi-static offset is none of those. It is fixed within a
+    shot and redrawn between them, which is exactly what an echo refocuses, and
+    a correction built on the channel picture will divide by an `f` that does
+    not describe what is actually happening.
+
+    So the echo answers the question before the correction is applied. Run one:
+    if it brings the coherence back, the dominant error is refocusable, the
+    channel premise is wrong, and the estimate is not to be relied on. If it
+    brings nothing back, the error is stochastic and the estimate is on firm
+    ground.
+
+    Returns the fraction, the verdict, and the reason for it. Suitable as a
+    `HardwareEvaluation(before_submit=...)` hook, though on a device it is a
+    characterization run of its own and costs what one costs.
+
+    ⚠ It answers about the mechanism, not about the arithmetic. A separate
+    failure is that the residual is not uniform at all but a product
+    distribution with the correlations gone; `blueqat.hardware.noise_shape`
+    tests for that, from the measurement itself, at no extra cost. The two are
+    independent and both worth reading.
+    """
+    fraction = refocusable_fraction(delays, qubit=qubit, n_qubits=n_qubits,
+                                    **run_kwargs)
+    applies = fraction <= REFOCUSABLE_LIMIT
+    if applies:
+        reason = (f"an echo recovers {fraction:.1%} of the lost coherence, so the "
+                  f"error is mostly stochastic and a depolarizing description "
+                  f"fits what is happening.")
+    else:
+        reason = (f"an echo recovers {fraction:.1%} of the lost coherence, so much "
+                  f"of the error is quasi-static -- fixed within a shot rather "
+                  f"than drawn afresh. That is not a channel, and an f estimated "
+                  f"as though it were will not describe it. Refocus instead, or "
+                  f"measure f some way that does not assume a channel.")
+    return {'refocusable': fraction, 'applies': applies, 'reason': reason}

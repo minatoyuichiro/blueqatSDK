@@ -22,7 +22,8 @@ from blueqat import Circuit
 from blueqat.noise import NoiseModel, QuasiStatic, phase_damping
 from blueqat.spin import (coherence_curve, coherence_of, echo_circuit,
                           fit_coherence, free_evolution_time, identify_noise,
-                          ramsey_circuit, refocusing_gain)
+                          ramsey_circuit, refocusable_fraction, refocusing_gain,
+                          uniform_correction_applies)
 
 DELAYS = [0, 2, 4, 6, 8]
 SIGMA = 0.3
@@ -192,3 +193,36 @@ def test_the_coherence_is_read_off_the_qubit_that_was_used():
 def test_a_state_vector_run_is_refused_with_the_reason():
     with pytest.raises(TypeError, match='density matrix'):
         coherence_of(ramsey_circuit(2))
+
+
+# --- whether a depolarizing correction describes what is happening ----------
+#
+# `hardware.remove_uniform` divides out a uniform background, and every way of
+# estimating its weight assumes the error is a channel: memoryless, stochastic,
+# redrawn each shot. A quasi-static offset is none of those, and an echo is
+# exactly the experiment that detects it.
+
+def test_a_refocusable_error_is_not_a_channel_so_the_correction_is_refused():
+    verdict = uniform_correction_applies(DELAYS, **QUASI_STATIC)
+    assert verdict['refocusable'] == pytest.approx(1.0, abs=1e-6)
+    assert verdict['applies'] is False
+    assert 'quasi-static' in verdict['reason']
+
+
+def test_a_stochastic_error_leaves_the_correction_on_firm_ground():
+    verdict = uniform_correction_applies(DELAYS, **MARKOVIAN)
+    assert verdict['refocusable'] == pytest.approx(0.0, abs=1e-6)
+    assert verdict['applies'] is True
+    assert 'stochastic' in verdict['reason']
+
+
+def test_an_echo_worse_than_its_ramsey_recovers_nothing_not_a_negative_amount():
+    """A refocusing pulse that costs more than it saves has recovered zero, and
+    reporting a negative fraction would invite arithmetic on it."""
+    assert refocusable_fraction(DELAYS, **MARKOVIAN) == 0.0
+
+
+def test_a_coherence_that_never_decayed_is_not_infinitely_refocusable():
+    """With nothing lost the ratio's denominator vanishes; the answer is that
+    there was nothing to recover, not that everything was recovered."""
+    assert refocusable_fraction(DELAYS, backend='density') == 0.0
