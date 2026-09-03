@@ -152,8 +152,62 @@ def _parse_targets(targets_str: str,
     return targets
 
 
-def from_qasm(qasm: str) -> Circuit:
-    """Parse an OpenQASM 2.0 program (the qelib1.inc gate set) into a Circuit."""
+def look_alike_characters(text: str) -> Dict[str, str]:
+    """Characters that are not what they look like, and what they should be.
+
+    Text pasted out of a PDF or a word processor carries characters that render
+    identically to ASCII or to an ordinary ideograph but are different code
+    points -- full-width punctuation and digits, and the 214 Kangxi radicals,
+    where ``子`` (U+5B50) and ``⼦`` (U+2F26) are indistinguishable on screen. A
+    program carrying them fails to parse for a reason nobody can see by looking.
+
+    Returns ``{character: what it normalizes to}`` for each distinct offender.
+    """
+    import unicodedata
+    out: Dict[str, str] = {}
+    for ch in text:
+        if ord(ch) < 128:
+            continue
+        replacement = unicodedata.normalize('NFKC', ch)
+        if replacement != ch:
+            out[ch] = replacement
+    return out
+
+
+def _look_alike_note(text: str) -> str:
+    """A sentence naming the look-alikes in `text`, or nothing."""
+    offenders = look_alike_characters(text)
+    if not offenders:
+        return ""
+    shown = ', '.join(f"{ch!r} (U+{ord(ch):04X}) for {want!r}"
+                      for ch, want in list(offenders.items())[:4])
+    more = '' if len(offenders) <= 4 else f", and {len(offenders) - 4} more"
+    return (f" The program contains characters that look like ASCII but are "
+            f"not: {shown}{more}. Text pasted from a PDF or a word processor "
+            f"does this. Pass normalize=True to from_qasm, or run the source "
+            f"through unicodedata.normalize('NFKC', ...) first.")
+
+
+def from_qasm(qasm: str, normalize: bool = False) -> Circuit:
+    """Parse an OpenQASM 2.0 program (the qelib1.inc gate set) into a Circuit.
+
+    `normalize` applies NFKC first, folding full-width punctuation and Kangxi
+    radicals onto their ASCII and ideographic equivalents. It is off by default
+    because silently rewriting input is a guess at what was meant; when parsing
+    fails, the error says whether such characters are present, which is
+    something no amount of looking at the text will reveal.
+    """
+    import unicodedata
+    if normalize:
+        qasm = unicodedata.normalize('NFKC', qasm)
+    try:
+        return _parse_program(qasm)
+    except ValueError as e:
+        note = _look_alike_note(qasm)
+        raise ValueError(f"{e}{note}") from None
+
+
+def _parse_program(qasm: str) -> Circuit:
     # strip line (//) and block (/* */) comments
     text = re.sub(r'/\*.*?\*/', '', qasm, flags=re.DOTALL)
     text = re.sub(r'//.*', '', text)
