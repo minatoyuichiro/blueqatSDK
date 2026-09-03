@@ -36,19 +36,56 @@ from blueqat.backends.draw_backend import DrawCircuit
 #: reads a bitstring is therefore version-dependent in a way nothing announces,
 #: and both versions call themselves blueqat.
 #:
-#: So a caller who cares can say so in one line, and fail loudly on a version
-#: that would answer backwards, since 2.0.4 has no such attribute::
+#: ⚠ Its absence does not identify a version. It was added after 2.1.3 was
+#: released, so an installed 2.1.3 -- which answers ``q0_last``, correctly --
+#: has no such attribute either. Treating "no attribute" as "2.0.4" would
+#: reject a working install.
 #:
-#:     assert blueqat.BIT_ORDER == "q0_last"
+#: The check that holds on every version measures instead of asking::
+#:
+#:     order = getattr(blueqat, "BIT_ORDER", None) or blueqat.measure_bit_order()
+#:     assert order == "q0_last"
+#:
+#: `measure_bit_order` runs one three-qubit circuit and reads the answer, so it
+#: is right about whatever is actually installed, including versions that
+#: predate both it and this constant -- copy its two lines rather than
+#: importing it, if the code has to run against those.
 #:
 #: `blueqat.backends.backendbase.apply_bit_order` converts, for talking to
 #: services that use the other convention.
 BIT_ORDER: str = "q0_last"
 
+
+def measure_bit_order() -> str:
+    """Which end of a counts key is qubit 0, established by running a circuit.
+
+    Returns ``"q0_last"`` or ``"q0_first"``. Asking costs one shot of a
+    three-qubit circuit and is the only answer that holds across versions:
+    `BIT_ORDER` did not always exist, and a version that lacks it may still be
+    a correct ``q0_last`` install.
+
+    The equivalent two lines, for code that must also run on a version without
+    this function::
+
+        c = Circuit(3); c.x[0]
+        order = "q0_last" if "001" in c.m[:].run(shots=1) else "q0_first"
+    """
+    circuit = Circuit(3)
+    circuit.x[0]
+    key = next(iter(circuit.m[:].run(shots=1)))
+    if key == "001":
+        return "q0_last"
+    if key == "100":
+        return "q0_first"
+    raise RuntimeError(
+        f"the probe circuit answered {key!r}, which is neither '001' nor "
+        f"'100'. Something other than the bit order is wrong.")
+
 # 公開するシンボルを明示的に指定（テスト環境の検出をより確実にします）
 __all__ = [
     "__version__",
     "BIT_ORDER",
+    "measure_bit_order",
     "Circuit",
     "BlueqatGlobalSetting",
     "Gate",

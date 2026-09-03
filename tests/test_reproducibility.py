@@ -296,3 +296,36 @@ def test_the_convention_is_exported_so_a_guard_is_one_line():
     import blueqat
     assert 'BIT_ORDER' in blueqat.__all__
     assert blueqat.BIT_ORDER in ('q0_last', 'q0_first')
+
+
+def test_the_measured_order_agrees_with_the_declared_one():
+    """If these ever disagree, the constant is lying and every guard built on
+    it is wrong."""
+    import blueqat
+    assert blueqat.measure_bit_order() == blueqat.BIT_ORDER
+
+
+def test_measuring_works_where_the_constant_would_not_exist():
+    """The constant was added after 2.1.3 shipped, so an installed 2.1.3 --
+    which answers q0_last, correctly -- has no attribute to read. Treating its
+    absence as "old and wrong" would reject a working install; measuring is
+    right about whatever is actually there."""
+    import blueqat
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.delattr(blueqat, 'BIT_ORDER')
+    try:
+        order = getattr(blueqat, 'BIT_ORDER', None) or blueqat.measure_bit_order()
+        assert order == 'q0_last'
+    finally:
+        monkeypatch.undo()
+    assert blueqat.BIT_ORDER == 'q0_last'
+
+
+def test_the_documented_two_liner_gives_the_same_answer():
+    """Code that cannot import measure_bit_order copies these two lines, so
+    they have to stay correct."""
+    import blueqat
+    circuit = Circuit(3)
+    circuit.x[0]
+    order = "q0_last" if "001" in circuit.m[:].run(shots=1) else "q0_first"
+    assert order == blueqat.BIT_ORDER
