@@ -240,6 +240,13 @@ def remove_uniform(probs: Dict[Tuple[int, ...], float], n_outcomes: int,
     suppressed by depolarizing noise and must not be divided. `get_energy` adds
     it without consulting the sampler, so it never passes through here.
 
+    ⚠ Before using this at all, check `noise_shape`. The model behind it --
+    ``q = f q_ideal + (1-f)/N`` -- has been seen not to hold on the device:
+    analysing real Toshiko output, what survived was a *product* distribution
+    (marginals 0.37/0.47/0.47, within 0.0395 of the product of its own
+    marginals) rather than a uniform background, and no amount of dividing
+    restores a correlation that is gone.
+
     ⚠ `rate` has to be measured; there is deliberately no estimator here.
     The obvious one -- read the background off the smallest observed
     probability -- only works when the ideal distribution has an outcome of
@@ -248,8 +255,37 @@ def remove_uniform(probs: Dict[Tuple[int, ...], float], n_outcomes: int,
     and could read `f` off the 3 that should have been empty. A VQE or QAOA
     circuit has no forbidden bitstrings, so it offers no such foothold, and an
     estimate taken this way would read the answer's own floor as noise and
-    inflate the result. Measure `f` with a reference circuit whose exact
-    distribution is known, submitted in the same batch.
+    inflate the result.
+
+    The ways of measuring `f` all have a catch, and none is done automatically
+    here:
+
+    - A **mirror circuit** (run ``U`` then ``U†``, which should return all
+      zeros) has the strongest argument on paper: same gates, same layout, and
+      under global depolarizing noise ``f_mirror == f**2`` exactly -- verified
+      in density-matrix simulation, with a 1 to 4 percent overestimate under
+      local depolarizing noise. ⚠ On the device that extrapolation does not
+      survive: measured Bell-plus-CX fidelities of 0.789, 0.711, 0.742 and
+      0.539 at 1, 3, 5 and 9 CX are not monotonic and give per-CX ratios of
+      0.949, 0.985 and 0.954. Squaring and square-rooting has no measured basis
+      on this hardware. A mirror also doubles the depth against a CX budget of
+      roughly 15.
+    - A **reference circuit** with a known answer costs an extra job, and
+      cannot be placed on the same physical qubits: `preserve_layout` is
+      refused by Toshiko, and the compiler's node numbering does not match the
+      calibration's. With per-pair CX fidelity ranging from 0.9537 to 0.9859,
+      the same depth elsewhere on the chip is not the same `f`. It must also
+      match the number of qubits *measured*, not just the gate count: at one CX
+      the measured 0.789 is already about the readout fidelity squared (0.8932²
+      = 0.798), so readout, not gates, dominates at shallow depth.
+    - A **calibration model**, ``0.9537**CX * 0.8932**measured``, costs nothing
+      but assumes independent errors, and the ledger records the calibration
+      power law coming out about twice as optimistic as the device (predicted
+      49 percent against a measured 24).
+
+    ⚠ And a measured `f` carries its own error into every number it divides:
+    at 256 shots that is about ±0.04, which can exceed what the correction
+    buys.
     """
     if not 0.0 < rate <= 1.0:
         raise ValueError(f"rate must be in (0, 1] -- it is the surviving signal "
@@ -258,6 +294,61 @@ def remove_uniform(probs: Dict[Tuple[int, ...], float], n_outcomes: int,
         return dict(probs)
     floor = (1.0 - rate) / n_outcomes
     return {bits: max(0.0, p - floor) / rate for bits, p in probs.items()}
+
+
+def total_variation(a: Dict[Tuple[int, ...], float],
+                    b: Dict[Tuple[int, ...], float]) -> float:
+    """Total variation distance between two distributions over bit tuples."""
+    keys = set(a) | set(b)
+    return 0.5 * sum(abs(a.get(k, 0.0) - b.get(k, 0.0)) for k in keys)
+
+
+def product_of_marginals(probs: Dict[Tuple[int, ...], float]
+                         ) -> Dict[Tuple[int, ...], float]:
+    """The distribution with the same single-qubit marginals and no correlation."""
+    if not probs:
+        return {}
+    width = len(next(iter(probs)))
+    ones = [sum(p for bits, p in probs.items() if bits[j]) for j in range(width)]
+    out = {}
+    for index in range(1 << width):
+        bits = tuple((index >> j) & 1 for j in range(width))
+        weight = 1.0
+        for j, bit in enumerate(bits):
+            weight *= ones[j] if bit else 1.0 - ones[j]
+        out[bits] = weight
+    return out
+
+
+def noise_shape(probs: Dict[Tuple[int, ...], float]) -> Dict[str, float]:
+    """How far the measured distribution is from uniform, and from a product.
+
+    Whether `remove_uniform` is the right thing to do at all depends on what
+    the noise did, and that is answerable from the measurement itself, with no
+    extra job.
+
+    - ``to_uniform`` small means the signal is mostly gone.
+    - ⚠ ``to_product`` small is the case to watch. It means what survived is
+      a distribution with the right single-qubit marginals and *no correlation
+      between qubits* -- the noise destroyed the correlations rather than
+      diluting the distribution with a uniform background. Dividing out a
+      uniform component will not bring the correlations back, so a correction
+      that makes the numbers look better there is making them look better
+      without making them righter.
+
+    This is not hypothetical. Analysed on real Toshiko output, the residual was
+    a product distribution to within 0.0395, with single-qubit marginals of
+    0.37/0.47/0.47 -- pulled toward 0.5 but not at it, which a uniform
+    background cannot produce.
+    """
+    if not probs:
+        return {"to_uniform": 0.0, "to_product": 0.0}
+    width = len(next(iter(probs)))
+    size = 1 << width
+    uniform = {bits: 1.0 / size for bits in
+               (tuple((i >> j) & 1 for j in range(width)) for i in range(size))}
+    return {"to_uniform": total_variation(probs, uniform),
+            "to_product": total_variation(probs, product_of_marginals(probs))}
 
 
 class HardwareEvaluation:
@@ -272,13 +363,19 @@ class HardwareEvaluation:
     `plan()` exists so that conversation can start from a number.
 
     `signal_fraction` is the surviving-signal fraction `f` for the uniform-noise
-    correction. Leave it None (the default) to report what was measured. See
-    `remove_uniform` for why there is no estimator for it.
+    correction. Leave it None (the default) to report what was measured; check
+    `noise_shape` before deciding it applies at all, and see `remove_uniform`
+    for why there is no estimator for `f`.
+
+    `before_submit(evaluation, summary)` is called after planning and before
+    anything is sent; raising from it stops the submission. A checker of
+    formulations, a cost ceiling, or an approval prompt goes there.
     """
 
     def __init__(self, ansatz, circuit: Circuit, shots: int = FREE_TIER_SHOTS,
                  qpu_id: Optional[str] = None, pack_qubits: bool = True,
-                 signal_fraction: Optional[float] = None) -> None:
+                 signal_fraction: Optional[float] = None,
+                 before_submit=None) -> None:
         if shots <= 0:
             raise ValueError(f"shots must be positive, got {shots}.")
         if signal_fraction is not None and not 0.0 < signal_fraction <= 1.0:
@@ -290,6 +387,13 @@ class HardwareEvaluation:
         self.qpu_id = qpu_id
         self.pack_qubits = pack_qubits
         self.signal_fraction = signal_fraction
+        #: Called with (self, plan summary) after planning and before anything
+        #: is sent. Raise from it to stop the submission. It is a hook rather
+        #: than a built-in check so that whatever does the checking stays a
+        #: dependency of the caller, not of blueqat -- which declares four
+        #: dependencies and was, until today, quietly broken for anyone who
+        #: did not also happen to have SciPy.
+        self.before_submit = before_submit
         self._plan: Optional[List[Dict[str, Any]]] = None
         self._requests: List[Tuple[str, Tuple[int, ...], int]] = []
         self.task_ids: Dict[str, str] = {}
@@ -373,6 +477,8 @@ class HardwareEvaluation:
                 f"{summary['estimated_cost_jpy']:.1f} JPY by the published rate, "
                 f"and {summary['monthly_quota_used']} of the monthly allowance. "
                 f"Get sign-off, then pass confirm=True.")
+        if self.before_submit is not None:
+            self.before_submit(self, self._summary())
         for job in self._plan:
             if job["key"] in self.task_ids:
                 continue
@@ -507,6 +613,11 @@ class HardwareEvaluation:
         if self.signal_fraction is not None:
             probs = remove_uniform(probs, 1 << len(packed), self.signal_fraction)
         return probs
+
+    def noise_shape(self) -> Dict[str, float]:
+        """`noise_shape` of what was measured. Free, and worth reading before
+        deciding whether `signal_fraction` means anything for this circuit."""
+        return noise_shape(self.probabilities())
 
     # -- carrying the run across sessions -----------------------------------
 

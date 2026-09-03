@@ -389,3 +389,86 @@ def test_packing_leaves_an_already_compact_circuit_alone():
     packed, back = hardware.compact(circuit)
     assert packed is circuit
     assert back == {0: 0, 1: 1, 2: 2}
+
+
+# --- is this correction even the right one ---------------------------------
+#
+# `q = f q_ideal + (1-f)/N` is a model, and it has been seen not to hold on the
+# device: analysing real Toshiko output, what survived was a product
+# distribution -- right single-qubit marginals, no correlation -- rather than a
+# uniform background. Dividing out a uniform component cannot restore a
+# correlation that is gone, so the shape is worth reporting.
+
+def _product(marginals):
+    import itertools
+    out = {}
+    for bits in itertools.product((0, 1), repeat=len(marginals)):
+        weight = 1.0
+        for m, b in zip(marginals, bits):
+            weight *= m if b else 1.0 - m
+        out[bits] = weight
+    return out
+
+
+def test_uniform_noise_leaves_the_correlations_visible():
+    ghz = {(0, 0, 0): 0.5, (1, 1, 1): 0.5}
+    f = 0.4
+    diluted = {bits: f * ghz.get(bits, 0.0) + (1 - f) / 8
+               for bits in _product([0.5, 0.5, 0.5])}
+    shape = hardware.noise_shape(diluted)
+    assert shape["to_product"] > 0.2      # correlations survive: correcting helps
+
+
+def test_a_product_residual_is_flagged_even_though_it_is_not_uniform():
+    """The measured case: marginals pulled toward 0.5 but not at it, which a
+    uniform background cannot produce."""
+    shape = hardware.noise_shape(_product([0.37, 0.47, 0.47]))
+    assert shape["to_product"] == pytest.approx(0.0, abs=1e-12)
+    assert shape["to_uniform"] > 0.1      # not uniform, yet uncorrelated
+
+
+def test_the_two_measures_agree_on_a_genuinely_uniform_distribution():
+    shape = hardware.noise_shape(_product([0.5, 0.5, 0.5]))
+    assert shape["to_uniform"] == pytest.approx(0.0, abs=1e-12)
+    assert shape["to_product"] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_total_variation_is_symmetric_and_zero_on_itself():
+    a = {(0, ): 0.3, (1, ): 0.7}
+    b = {(0, ): 0.5, (1, ): 0.5}
+    assert hardware.total_variation(a, a) == pytest.approx(0.0)
+    assert hardware.total_variation(a, b) == pytest.approx(hardware.total_variation(b, a))
+    assert hardware.total_variation(a, b) == pytest.approx(0.2)
+
+
+# --- the pre-submit hook ---------------------------------------------------
+
+def test_a_hook_can_stop_the_submission():
+    """Kept a hook rather than a built-in check so the checker stays a
+    dependency of the caller."""
+    ansatz, result = _qaoa(Z[0] * Z[1])
+    seen = {}
+
+    def veto(evaluation, summary):
+        seen.update(summary)
+        raise RuntimeError("this formulation is degenerate")
+
+    evaluation = hardware.HardwareEvaluation(ansatz, result.circuit, before_submit=veto)
+    device = FakeDevice()
+    cloud.configure(api_key='k', transport=device)
+    with pytest.raises(RuntimeError, match='degenerate'):
+        evaluation.submit(confirm=True)
+    assert device.submitted == []          # nothing was sent
+    assert seen["jobs"] == 1               # and it saw the plan
+
+
+def test_a_hook_that_returns_lets_the_submission_through():
+    ansatz, result = _qaoa(Z[0] * Z[1])
+    calls = []
+    evaluation = hardware.HardwareEvaluation(
+        ansatz, result.circuit,
+        before_submit=lambda ev, summary: calls.append(summary))
+    cloud.configure(api_key='k', transport=FakeDevice())
+    evaluation.submit(confirm=True)
+    assert len(calls) == 1
+    assert evaluation.task_ids
