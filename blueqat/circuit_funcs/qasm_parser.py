@@ -182,39 +182,102 @@ def look_alike_characters(text: str) -> Dict[str, str]:
     return out
 
 
-#: Ranges that are always a mistake in text meant to be read or matched: the
-#: 214 Kangxi radicals and the CJK radicals supplement, which duplicate
-#: ordinary ideographs, and full-width Latin letters and digits, which
-#: duplicate ASCII. Full-width *punctuation* is deliberately not here -- it is
-#: correct Japanese typography, and flagging it is what turns a real finding
-#: into a wave of false alarms.
-LOOK_ALIKE_RANGES = (
+#: Look-alikes that are damage from extracting text, never an authored choice.
+#: A reader seeing one is already looking at something broken, so these are the
+#: ones it is safe to repair in the stored text itself. Counted over each
+#: range, the share NFKC repairs:
+#:
+#:     Kangxi radicals          U+2F00-2FD5   214 of 214   100%
+#:     CJK compatibility ideos  U+F900-FAFF   460 of 472  97.5%
+#:
+#: The CJK radicals supplement, U+2E80-2EF3, looks like it belongs here and
+#: does not: 2 of its 115 characters change under NFKC, so including it means
+#: reporting things this cannot repair.
+EXTRACTION_DAMAGE_RANGES = (
     (0x2F00, 0x2FD5),      # Kangxi radicals
-    (0x2E80, 0x2EF3),      # CJK radicals supplement
-    (0xFF21, 0xFF3A),      # full-width A-Z
-    (0xFF41, 0xFF5A),      # full-width a-z
-    (0xFF10, 0xFF19),      # full-width 0-9
+    (0xF900, 0xFAFF),      # CJK compatibility ideographs
 )
 
+#: Look-alikes that may be exactly what someone meant to write. Full-width
+#: letters are the registered form of some company names and appear in
+#: quotations that must not be altered; half-width kana is a presentation
+#: choice. Normalize these into a *search index*, never in the stored text.
+PRESENTATION_RANGES = (
+    (0xFF10, 0xFF19),      # full-width 0-9
+    (0xFF21, 0xFF3A),      # full-width A-Z
+    (0xFF41, 0xFF5A),      # full-width a-z
+    (0xFF61, 0xFF9F),      # half-width kana
+)
 
-def always_wrong_characters(text: str) -> Dict[str, str]:
-    """Look-alikes that are a mistake wherever they appear.
+#: Both, which is what a *program* cares about: QASM is ASCII by definition, so
+#: the distinction between damage and intent does not arise inside one.
+LOOK_ALIKE_RANGES = EXTRACTION_DAMAGE_RANGES + PRESENTATION_RANGES
 
-    A subset of `look_alike_characters`, restricted to the ranges that
-    duplicate an ordinary character with no typographic role of their own. This
-    is the one to use as a check: it catches the Kangxi radical ``⼦`` (U+2F26)
-    masquerading as ``子`` (U+5B50), and full-width ``ＦＡＱ`` that will not
-    match ``FAQ``, while leaving ``（``, ``①`` and ``㎡`` alone.
 
-    Note that a QASM program is a stricter case: it is ASCII by definition, so
-    `from_qasm` reports every look-alike rather than only these.
-    """
+def _in_ranges(text: str, ranges, repairable: bool = True) -> Dict[str, str]:
     import unicodedata
     out: Dict[str, str] = {}
     for ch in text:
-        if any(low <= ord(ch) <= high for low, high in LOOK_ALIKE_RANGES):
-            out[ch] = unicodedata.normalize('NFKC', ch)
+        if not any(low <= ord(ch) <= high for low, high in ranges):
+            continue
+        replacement = unicodedata.normalize('NFKC', ch)
+        if (replacement != ch) == repairable:
+            out[ch] = replacement
     return out
+
+
+def extraction_damage(text: str) -> Dict[str, str]:
+    """Look-alikes that got there by accident, and their repair.
+
+    Kangxi radicals and compatibility ideographs come from extracting text, not
+    from anyone typing them: U+2F26 renders exactly like U+5B50 and is a
+    different character, so a document carrying them cannot be searched for its
+    own words. Because nobody chose them, these are safe to fix in the stored
+    text -- quoting and display get better too.
+    """
+    return _in_ranges(text, EXTRACTION_DAMAGE_RANGES)
+
+
+def presentation_variants(text: str) -> Dict[str, str]:
+    """Look-alikes that may be deliberate. Normalize an index, not the text.
+
+    Full-width letters are the registered form of some company names and appear
+    inside quotations that must stay as they were; half-width kana is a
+    presentation choice. Nothing here can tell an intentional one from an
+    accident, so rewriting the stored text changes names and misquotes sources.
+    Normalize both the index and the query instead, and leave the text alone.
+    """
+    return _in_ranges(text, PRESENTATION_RANGES)
+
+
+def always_wrong_characters(text: str) -> Dict[str, str]:
+    """Every look-alike, damage or presentation, with its repair.
+
+    The union of `extraction_damage` and `presentation_variants`. Right for a
+    program -- QASM is ASCII, so anything here is a mistake in one -- and the
+    wrong question for prose, where the two halves want opposite treatment.
+
+    Only characters NFKC actually changes are returned. Reporting one whose
+    normalized form is itself would be naming a problem and offering the
+    problem as its own solution; see `unfixable_lookalikes`.
+    """
+    return _in_ranges(text, LOOK_ALIKE_RANGES)
+
+
+def unfixable_lookalikes(text: str) -> Dict[str, str]:
+    """Look-alikes that normalizing will *not* resolve.
+
+    Twelve compatibility ideographs -- U+FA0E, FA0F, FA11, FA13, FA14, FA1F,
+    FA21, FA23, FA24, FA27, FA28 and FA29 -- normalize to themselves, so U+FA11
+    and U+5D0E stay different after NFKC on both sides. Variant forms of a
+    personal name are the usual way to meet them, and they need a different
+    answer entirely.
+
+    Returned as ``{character: itself}`` so that "found it" and "fixed it" stay
+    distinguishable: calling a normalization pass a resolution here is how the
+    same report comes back a second time.
+    """
+    return _in_ranges(text, LOOK_ALIKE_RANGES, repairable=False)
 
 
 def _look_alike_note(text: str) -> str:

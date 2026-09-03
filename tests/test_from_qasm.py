@@ -104,10 +104,66 @@ def test_always_wrong_characters_catches_the_real_impostors(text, expected):
     assert always_wrong_characters(text) == expected
 
 
-def test_the_cjk_radicals_supplement_counts_too():
-    """The same trap one block earlier in the code space, and easy to miss."""
+def test_the_cjk_radicals_supplement_is_not_included():
+    """It looks like it belongs and does not: 2 of its 115 characters change
+    under NFKC, so listing it means reporting damage this cannot repair.
+
+    An earlier version did include it, and this test asserted only that the
+    result was non-empty -- which it was, because the character mapped to
+    *itself*. It passed while the function named a problem and offered the
+    problem as its own solution. Built from code points, never from a literal:
+    writing the same character twice and comparing always agrees."""
     from blueqat.circuit_funcs.qasm_parser import always_wrong_characters
-    assert always_wrong_characters('⺀')       # CJK RADICAL REPEAT
+    supplement = chr(0x2E80)                  # CJK RADICAL REPEAT
+    assert always_wrong_characters(supplement) == {}
+
+
+def test_the_ranges_are_the_ones_nfkc_can_actually_repair():
+    """Membership was decided by counting, not by which block a character
+    looks like it belongs to."""
+    import unicodedata
+    from blueqat.circuit_funcs.qasm_parser import LOOK_ALIKE_RANGES
+    for low, high in LOOK_ALIKE_RANGES:
+        defined = [chr(cp) for cp in range(low, high + 1)
+                   if unicodedata.name(chr(cp), None)]
+        repaired = [c for c in defined if unicodedata.normalize('NFKC', c) != c]
+        assert len(repaired) / len(defined) > 0.9, f"U+{low:04X}-{high:04X}"
+
+
+def test_extraction_damage_is_separated_from_deliberate_typography():
+    """The two want opposite treatment: damage can be repaired in the stored
+    text, because nobody chose it; a full-width company name cannot, because
+    somebody did."""
+    from blueqat.circuit_funcs.qasm_parser import (extraction_damage,
+                                                   presentation_variants)
+    company = '博報堂' + chr(0xFF24) + chr(0xFF39)      # full-width D, Y
+    assert extraction_damage(company) == {}
+    assert set(presentation_variants(company)) == {chr(0xFF24), chr(0xFF39)}
+
+    damaged = '量' + chr(0x2F26)                        # Kangxi radical child
+    assert extraction_damage(damaged) == {chr(0x2F26): '子'}
+    assert presentation_variants(damaged) == {}
+
+
+def test_half_width_kana_is_a_presentation_choice_not_damage():
+    from blueqat.circuit_funcs.qasm_parser import (extraction_damage,
+                                                   presentation_variants)
+    kana = chr(0xFF83) + chr(0xFF7D) + chr(0xFF84)       # half-width te su to
+    assert extraction_damage(kana) == {}
+    assert len(presentation_variants(kana)) == 3
+
+
+def test_the_variants_normalizing_cannot_fix_are_reported_separately():
+    """U+FA11 and U+5D0E stay different after NFKC on both sides, so a name
+    written with one will not match the other. Saying a normalization pass
+    resolved it is how the same report comes back a second time."""
+    import unicodedata
+    from blueqat.circuit_funcs.qasm_parser import (always_wrong_characters,
+                                                   unfixable_lookalikes)
+    variant, ordinary = chr(0xFA11), chr(0x5D0E)
+    assert unicodedata.normalize('NFKC', variant) != unicodedata.normalize('NFKC', ordinary)
+    assert always_wrong_characters(variant) == {}
+    assert unfixable_lookalikes(variant) == {variant: variant}
 
 
 def test_qasm_itself_is_stricter_than_prose():
