@@ -370,6 +370,38 @@ def noise_shape(probs: Dict[Tuple[int, ...], float]) -> Dict[str, float]:
             "to_product": total_variation(probs, product_of_marginals(probs))}
 
 
+def _warn_if_uniform_does_not_describe_it(probs, n_outcomes: int, where: str) -> None:
+    """Say so when a correction is being applied to something it cannot fit.
+
+    The model is ``q = f q_ideal + (1-f)/N``. It scales whatever correlations
+    the ideal answer had by `f`; it cannot remove them. So a measured
+    distribution that is close to the product of its own marginals while being
+    far from uniform is something the model can only produce if the ideal
+    answer was itself a product -- and if it was not, dividing out a uniform
+    background is arithmetic on a premise that does not hold.
+
+    This is checkable at exactly the moment it matters, from the counts in
+    hand, for free. It warns rather than refuses because "the ideal answer was
+    a product" is a thing the caller may well know and this cannot.
+    """
+    import warnings
+    shape = noise_shape(probs)
+    if shape["to_uniform"] < 1e-9:
+        return                        # genuinely uniform: nothing survived
+    if shape["to_product"] > 0.1 * shape["to_uniform"]:
+        return                        # correlations still there; the model fits
+    warnings.warn(
+        f"correcting {where}, but what was measured is {shape['to_product']:.4f} "
+        f"from the product of its own marginals and {shape['to_uniform']:.4f} "
+        f"from uniform: the correlations are gone while the distribution is "
+        f"not uniform. A uniform background cannot produce that unless the "
+        f"ideal answer was itself uncorrelated -- if it was not, dividing one "
+        f"out will not bring the correlations back, and the corrected numbers "
+        f"will look better without being closer. Check "
+        f"blueqat.spin.uniform_correction_applies for the other premise.",
+        UserWarning, stacklevel=3)
+
+
 class HardwareEvaluation:
     """Evaluate an ansatz's energy for one set of parameters, on a device.
 
@@ -595,6 +627,8 @@ class HardwareEvaluation:
             probs = _marginal(self.counts[key], packed_meas, n_qubits,
                               self.bit_orders.get(key, "q0_first"))
             if self.signal_fraction is not None:
+                _warn_if_uniform_does_not_describe_it(
+                    probs, 1 << len(packed_meas), "an energy term")
                 probs = remove_uniform(probs, 1 << len(packed_meas),
                                        self.signal_fraction)
             return probs
@@ -630,6 +664,8 @@ class HardwareEvaluation:
         probs = _marginal(self.counts[job["key"]], packed, job["n_qubits"],
                           self.bit_orders.get(job["key"], "q0_first"))
         if self.signal_fraction is not None:
+            _warn_if_uniform_does_not_describe_it(
+                probs, 1 << len(packed), "the measured distribution")
             probs = remove_uniform(probs, 1 << len(packed), self.signal_fraction)
         return probs
 

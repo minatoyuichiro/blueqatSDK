@@ -14,6 +14,7 @@
 """Running a variational result on hardware, without any hardware."""
 
 import json
+import warnings
 
 import pytest
 import torch
@@ -472,3 +473,63 @@ def test_a_hook_that_returns_lets_the_submission_through():
     evaluation.submit(confirm=True)
     assert len(calls) == 1
     assert evaluation.task_ids
+
+
+# --- correcting something the correction cannot fit -------------------------
+#
+# The model is q = f q_ideal + (1-f)/N. It scales whatever correlations the
+# ideal answer had by f; it cannot remove them. A measurement close to the
+# product of its own marginals while far from uniform is therefore something
+# the model can only produce if the ideal answer was itself uncorrelated.
+
+def test_correcting_a_product_residual_warns():
+    """The measured case: correlations gone, distribution not uniform."""
+    with pytest.warns(UserWarning, match='correlations are gone'):
+        hardware._warn_if_uniform_does_not_describe_it(_product([0.37, 0.47, 0.47]), 8, 'x')
+
+
+def test_correcting_a_uniformly_diluted_distribution_is_quiet():
+    """Here the model does describe it, so there is nothing to say."""
+    ghz = {(0, 0, 0): 0.5, (1, 1, 1): 0.5}
+    f = 0.4
+    diluted = {bits: f * ghz.get(bits, 0.0) + (1 - f) / 8
+               for bits in _product([0.5, 0.5, 0.5])}
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        hardware._warn_if_uniform_does_not_describe_it(diluted, 8, 'x')
+
+
+def test_a_genuinely_uniform_result_is_quiet():
+    """Nothing survived, which is a different problem and not this one."""
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        hardware._warn_if_uniform_does_not_describe_it(_product([0.5] * 3), 8, 'x')
+
+
+def test_the_warning_only_appears_when_a_correction_is_asked_for():
+    """Reporting what was measured is never wrong; it is dividing that needs
+    the premise to hold."""
+    ansatz, result = _qaoa(Z[0] * Z[1])
+
+    def counts_for(payload):
+        # Correlations gone, not uniform: 0.37/0.47 marginals, independent.
+        total = 1 << 16
+        out = {}
+        for a in (0, 1):
+            for b in (0, 1):
+                p = (0.37 if a else 0.63) * (0.47 if b else 0.53)
+                out[f"{a}{b}"] = int(p * total)
+        return out
+
+    cloud.configure(api_key='k', transport=FakeDevice(counts_for=counts_for))
+    plain = hardware.HardwareEvaluation(ansatz, result.circuit)
+    plain.submit(confirm=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        plain.probabilities()               # no correction, no warning
+
+    corrected = hardware.HardwareEvaluation(ansatz, result.circuit,
+                                            signal_fraction=0.5)
+    corrected.submit(confirm=True)
+    with pytest.warns(UserWarning, match='correlations are gone'):
+        corrected.probabilities()
