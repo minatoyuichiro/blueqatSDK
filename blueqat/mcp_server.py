@@ -132,6 +132,59 @@ def eo_transpile(qasm: str) -> Dict[str, Any]:
             "pulses_preview": sched["pulses"][:10]}
 
 
+class NotExamined(RuntimeError):
+    """The request never got far enough to say anything about the circuit.
+
+    A model reads what a tool returns, and a bare failure reads as a verdict on
+    the input: shown ``HTTP 404`` or ``connection refused``, it concludes the
+    circuit is at fault and starts rewriting a circuit that was never looked
+    at. The message therefore says three things -- that the attempt failed,
+    that the circuit itself is not implicated, and that it has not been checked
+    -- and the third is the one that stops a rewrite.
+    """
+
+
+def _service_failure(action: str, error: BaseException) -> 'NotExamined':
+    return NotExamined(
+        f"Could not {action}: {error}. This is not a problem with the circuit, "
+        f"and the circuit has NOT been checked -- it was never examined. Do not "
+        f"change it in response to this. Retry, or run it locally with the "
+        f"non-cloud tools, which need no service.")
+
+
+def _through_the_service(action: str):
+    """Wrap a call so a service failure is not read as a verdict on the input.
+
+    A `ValueError` is left alone: the parser raising one really is about the
+    circuit, and saying otherwise would be the mirror-image mistake.
+    """
+    def decorate(function):
+        import functools
+
+        @functools.wraps(function)
+        def wrapper(*args, **kwargs):
+            try:
+                return function(*args, **kwargs)
+            except ValueError:
+                raise                       # genuinely about the circuit
+            except NotExamined:
+                raise
+            except Exception as error:
+                from .cloud import CloudOutcomeUnknown
+                if isinstance(error, CloudOutcomeUnknown):
+                    # "It may already have run" is a different message from
+                    # "it was never examined", and the difference matters: the
+                    # advice below is to retry, which is the one thing not to
+                    # do when the work may already be done and paid for.
+                    raise
+                raise _service_failure(action, error) from None
+
+        return wrapper
+
+    return decorate
+
+
+@_through_the_service("reach the Blueqat cloud")
 def cloud_run_circuit(qasm: str, shots: Optional[int] = None,
                       hamiltonian: Optional[str] = None,
                       mode: str = "tensornet") -> Dict[str, Any]:
@@ -157,6 +210,7 @@ def cloud_run_circuit(qasm: str, shots: Optional[int] = None,
             "statevector": [[float(z.real), float(z.imag)] for z in state.tolist()]}
 
 
+@_through_the_service("read the hardware status")
 def cloud_hardware_status() -> Dict[str, Any]:
     """Near-real-time status of the real quantum hardware behind the Blueqat
     cloud (public; no API key needed)."""

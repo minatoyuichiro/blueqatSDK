@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from blueqat import Circuit
+import blueqat.mcp_server as mcp_server
 from blueqat.mcp_server import (blueqat_info, circuit_stats, draw_circuit_png,
                                 eo_transpile, expectation_value, run_circuit)
 from blueqat.utils import X, Z, parse_hamiltonian
@@ -140,3 +141,68 @@ def test_build_server_registers_tools():
     assert {"run_qasm", "qasm_stats", "qasm_expectation", "draw_qasm",
             "qasm_to_eo_pulses", "run_qasm_on_cloud", "blueqat_info"} <= names
     assert "run_circuit" not in names
+
+
+# --- what a model reads when a tool fails ----------------------------------
+#
+# The caller here is a model, and a bare failure reads as a verdict on the
+# input: shown a connection error, it concludes the circuit is at fault and
+# rewrites a circuit that was never looked at. So a service failure has to say
+# that the circuit was not examined -- and a circuit fault has to keep saying
+# that it was.
+
+GOOD_QASM = 'OPENQASM 2.0;\ninclude "qelib1.inc";\nqreg q[1];\nh q[0];\n'
+
+
+def test_an_unreachable_service_says_the_circuit_was_not_examined(monkeypatch):
+    import blueqat.cloud as cloud
+    cloud.configure(api_key=None, endpoint='https://does-not-exist.invalid/v1')
+    try:
+        with pytest.raises(mcp_server.NotExamined) as exc:
+            mcp_server.cloud_run_circuit(GOOD_QASM, shots=10)
+    finally:
+        cloud.reset_configuration()
+    message = str(exc.value)
+    assert 'NOT been checked' in message
+    assert 'Do not change it' in message
+
+
+def test_a_broken_circuit_still_reads_as_a_problem_with_the_circuit():
+    """The mirror-image mistake would be telling a model its circuit is fine
+    when the parser has just rejected it."""
+    with pytest.raises(ValueError, match='Unsupported QASM gate'):
+        mcp_server.cloud_run_circuit('foo q[0];', shots=10)
+
+
+def test_an_unknown_outcome_is_not_turned_into_advice_to_retry(monkeypatch):
+    """A gateway timeout means the work may already have run and been paid
+    for. Wrapping it in "not examined -- retry" would advise the one thing not
+    to do, so it passes through with its own message."""
+    import io
+    import urllib.error
+    import urllib.request
+
+    import blueqat.cloud as cloud
+
+    def timeout(*args, **kwargs):
+        raise urllib.error.HTTPError('u', 524, 'Gateway Timeout', {}, io.BytesIO(b'{}'))
+
+    monkeypatch.setattr(urllib.request, 'urlopen', timeout)
+    cloud.configure(api_key='k')
+    try:
+        with pytest.raises(cloud.CloudOutcomeUnknown) as exc:
+            mcp_server.cloud_run_circuit(GOOD_QASM, shots=10)
+    finally:
+        cloud.reset_configuration()
+    assert 'Retry' not in str(exc.value)
+    assert 'Do not resubmit' in str(exc.value)
+
+
+def test_the_hardware_status_tool_is_guarded_the_same_way(monkeypatch):
+    import blueqat.cloud as cloud
+    cloud.configure(endpoint='https://does-not-exist.invalid/v1')
+    try:
+        with pytest.raises(mcp_server.NotExamined, match='not a problem with the circuit'):
+            mcp_server.cloud_hardware_status()
+    finally:
+        cloud.reset_configuration()
