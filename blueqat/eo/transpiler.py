@@ -59,7 +59,17 @@ class EOTranspiler(Backend):
 
     def run(self, gates: List[Operation], n_qubits: int, *args: Any,
             **kwargs: Any) -> Circuit:
+        """`shortest=True` solves each single-qubit gate in closed form rather
+        than reading it out of the analytic tables.
+
+        The tables compose known sequences, which is correct and longer than
+        necessary: measured, an `rx` costs seven pulses there and three or four
+        solved directly, an `ry` nine. A pulse is a gate on this hardware, so
+        that is the error budget. It is off by default because it changes the
+        emitted pulses for circuits that already work, and a device schedule is
+        not something to alter without being asked."""
         from ..gate import GateBlock
+        shortest = bool(kwargs.get('shortest', False))
         pulses: List[sequences.Pulse] = []
         for gate in gates:
             name = gate.lowername
@@ -72,12 +82,14 @@ class EOTranspiler(Backend):
                 continue
             if name in ('i', 'barrier'):
                 continue
-            if name in self._FIXED:
+            if name in self._FIXED or name in self._ROTATIONS:
                 for t in gate.target_iter(n_qubits):
-                    pulses += self._FIXED[name](offset=3 * t)
-            elif name in self._ROTATIONS:
-                for t in gate.target_iter(n_qubits):
-                    pulses += self._ROTATIONS[name](gate.theta, offset=3 * t)
+                    if shortest:
+                        pulses += self._solve(gate, name, 3 * t, n_qubits)
+                    elif name in self._FIXED:
+                        pulses += self._FIXED[name](offset=3 * t)
+                    else:
+                        pulses += self._ROTATIONS[name](gate.theta, offset=3 * t)
             elif name == 'cx':
                 for c, t in gate.control_target_iter(n_qubits):
                     pulses += sequences.cx_sequence(3 * c, 3 * t)
@@ -93,6 +105,29 @@ class EOTranspiler(Backend):
                     "transpiler. Decompose it into "
                     "x/y/z/h/s/t/rx/ry/rz/cx/cz/swap first.")
         return sequences.sequence_to_circuit(pulses, 3 * n_qubits)
+
+    @staticmethod
+    def _solve(gate: Operation, name: str, offset: int,
+               n_qubits: int) -> List[sequences.Pulse]:
+        """One single-qubit gate, solved directly from its matrix."""
+        import torch
+        from ..circuit import Circuit
+        from ..circuit_funcs import circuit_to_unitary
+        from .optimizer import decompose_1q
+        single = Circuit(1)
+        single.ops.append(gate.__class__((0, ), *gate.params_iter())
+                          if False else _retargeted(gate))
+        matrix = torch.as_tensor(circuit_to_unitary(single),
+                                 dtype=torch.complex128)
+        return decompose_1q(matrix, offset=offset)
+
+
+def _retargeted(gate: Operation) -> Operation:
+    """A copy of a one-qubit gate acting on qubit 0, for reading its matrix."""
+    import copy
+    moved = copy.copy(gate)
+    moved.targets = (0, )
+    return moved
 
 
 register_backend('eo', EOTranspiler, overwrite=True)

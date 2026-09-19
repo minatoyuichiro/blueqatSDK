@@ -399,3 +399,116 @@ def test_exchange_circuit_serializes_for_cloud():
     c2 = deserialize(serialize(phys))
     init = encoding.encode_state([(1, 0)])
     assert torch.allclose(phys.run(initial=init), c2.run(initial=init), atol=1e-12)
+
+
+# --- solving a one-qubit gate instead of composing tables -------------------
+#
+# The two exchange pairs of a triple act on the logical qubit as rotations
+# about axes 120 degrees apart, by exactly the pulse area. That makes a
+# one-qubit gate a two-axis Euler problem with a closed form, and fixes what
+# three pulses can reach: the outer pulses are diagonal, so the off-diagonal
+# entry of the product comes from the middle one alone.
+
+def _logical_of(sequence, n_triples=1):
+    import torch
+    from blueqat.circuit_funcs import circuit_to_unitary
+    from blueqat.eo.encoding import logical_action
+    from blueqat.eo.sequences import sequence_to_circuit
+    unitary = torch.as_tensor(circuit_to_unitary(
+        sequence_to_circuit(sequence, 3 * n_triples)), dtype=torch.complex128)
+    return logical_action(unitary)
+
+
+def _fidelity(target, sequence):
+    import torch
+    got = _logical_of(sequence)
+    return float(abs(torch.trace(got.conj().T @ torch.as_tensor(
+        target, dtype=torch.complex128))) / 2)
+
+
+def _rx(theta):
+    import torch
+    x = torch.tensor([[0, 1], [1, 0]], dtype=torch.complex128)
+    return torch.matrix_exp(-0.5j * theta * x)
+
+
+def _ry(theta):
+    import torch
+    y = torch.tensor([[0, -1j], [1j, 0]], dtype=torch.complex128)
+    return torch.matrix_exp(-0.5j * theta * y)
+
+
+@pytest.mark.parametrize('theta', [0.0, 0.3, 1.0, math.pi / 2, 2.0, 2.5,
+                                   math.pi, 4.0, 5.9])
+def test_a_rotation_is_solved_exactly(theta):
+    from blueqat.eo.optimizer import decompose_1q
+    for target in (_rx(theta), _ry(theta)):
+        sequence = decompose_1q(target)
+        assert len(sequence) <= 4
+        assert _fidelity(target, sequence) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_three_pulses_where_the_formula_says_three():
+    """`|U01| <= sqrt(3)/2` is not a guess about what an optimizer manages; it
+    is the modulus the middle pulse can produce, and for rx it means
+    theta <= 2*pi/3."""
+    from blueqat.eo.optimizer import decompose_1q, THREE_PULSE_REACH
+    assert THREE_PULSE_REACH == pytest.approx(math.sqrt(3) / 2)
+    for theta in (0.3, 1.0, math.pi / 2, 2.0):
+        assert abs(complex(_rx(theta)[0, 1])) <= THREE_PULSE_REACH
+        assert len(decompose_1q(_rx(theta))) == 3
+    for theta in (2.5, math.pi):
+        assert abs(complex(_rx(theta)[0, 1])) > THREE_PULSE_REACH
+        assert len(decompose_1q(_rx(theta))) == 4
+
+
+def test_it_beats_the_analytic_tables_by_a_factor_of_two_or_three():
+    """A pulse is a gate on this hardware, so the count is the error budget."""
+    from blueqat.eo import sequences
+    from blueqat.eo.optimizer import decompose_1q
+    assert len(sequences.rx_sequence(0.3)) == 7
+    assert len(decompose_1q(_rx(0.3))) == 3
+    assert len(sequences.ry_sequence(1.0)) == 9
+    assert len(decompose_1q(_ry(1.0))) == 3
+
+
+def test_a_random_gate_is_solved_too():
+    import torch
+    from blueqat.eo.optimizer import decompose_1q
+    generator = torch.Generator().manual_seed(3)
+    for _ in range(40):
+        raw = (torch.randn(2, 2, generator=generator, dtype=torch.float64)
+               + 1j * torch.randn(2, 2, generator=generator, dtype=torch.float64))
+        target, _ = torch.linalg.qr(raw.to(torch.complex128))
+        sequence = decompose_1q(target)
+        assert len(sequence) <= 4
+        assert _fidelity(target, sequence) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_pulses_land_on_the_triple_they_were_asked_for():
+    from blueqat.eo.optimizer import decompose_1q
+    for offset in (0, 3, 9):
+        for (i, j), _ in decompose_1q(_rx(1.0), offset=offset):
+            assert {i, j} <= {offset, offset + 1, offset + 2}
+
+
+def test_the_transpiler_can_use_it_and_gets_the_same_gate():
+    import torch
+    from blueqat.circuit_funcs import circuit_to_unitary
+    from blueqat.eo.encoding import logical_action
+    circuit = Circuit(1).rx(0.3)[0].ry(1.0)[0].h[0]
+    tables = circuit.run(backend='eo')
+    solved = circuit.run(backend='eo', shortest=True)
+    assert len(solved.ops) < len(tables.ops)
+    both = [logical_action(torch.as_tensor(circuit_to_unitary(c),
+                                           dtype=torch.complex128))
+            for c in (tables, solved)]
+    assert float(abs(torch.trace(both[0].conj().T @ both[1])) / 2) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_the_tables_stay_the_default():
+    """It changes the pulses emitted for circuits that already work, and a
+    device schedule is not something to alter without being asked."""
+    circuit = Circuit(1).rx(0.3)[0]
+    assert len(circuit.run(backend='eo').ops) == 7
+    assert len(circuit.run(backend='eo', shortest=True).ops) == 3

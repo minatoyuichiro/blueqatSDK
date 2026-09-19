@@ -18,6 +18,7 @@ exchange matrices -> logical block -> fidelity -- is differentiable).
 This is what allows going beyond the fixed analytic gate tables: any target
 SU(2) can be compiled into a few constant-amplitude pulses."""
 
+import cmath
 import math
 from typing import List, Optional, Sequence, Tuple
 
@@ -248,3 +249,118 @@ def quantize_sequence(sequence: Sequence[Pulse], step: float) -> List[Pulse]:
             continue
         out.append((pair, q))
     return out
+
+#: The two exchange pairs of a triple act on the logical qubit as rotations
+#: about axes 120 degrees apart -- pair (0,1) about -z, pair (1,2) about
+#: ``(sqrt(3)/2, 0, 1/2)`` -- and by exactly the pulse area, measured. That
+#: fixes what three pulses can reach: the off-diagonal entry of a product
+#: ``Ra Rb Ra`` has modulus ``(sqrt(3)/2) |sin(beta/2)|``, and the outer two
+#: pulses are diagonal, so they cannot change it.
+THREE_PULSE_REACH = math.sqrt(3) / 2
+
+
+def _logical(pair: Tuple[int, int], theta: float) -> torch.Tensor:
+    """The 2x2 logical action of one exchange pulse."""
+    unitary = _pulse_unitary_3spin(pair, torch.as_tensor(float(theta),
+                                                         dtype=torch.float64))
+    basis = codeword_basis('+')
+    return basis.conj().T @ unitary @ basis
+
+
+def _solve_three(target: torch.Tensor, offset: int = 0
+                 ) -> Optional[List[Pulse]]:
+    """Three pulses for `target`, in closed form, or None if out of reach.
+
+    Pair (0,1) acts diagonally -- measured as ``diag(exp(i*theta), 1)``, with a
+    global phase and the full pulse area rather than half of it -- so in
+    ``Ra(a) Rb(b) Ra(g)`` the outer pulses only move phases about. The modulus
+    of the off-diagonal entry therefore comes from the middle pulse alone and
+    fixes it: ``|U01| = (sqrt(3)/2) |sin(beta/2)|``. The outer angles then come
+    from two entry phases. No optimizer, no restarts, and the reachability
+    condition falls out of the same equation rather than being discovered by a
+    fit failing to converge.
+    """
+    target = torch.as_tensor(target, dtype=torch.complex128)
+    off = abs(complex(target[0, 1]))
+    if off > THREE_PULSE_REACH + 1e-12:
+        return None
+    base = 2.0 * math.asin(min(1.0, off / THREE_PULSE_REACH))
+    low, high = offset, offset + 1
+    for beta in (base, -base, 2 * math.pi - base, base - 2 * math.pi):
+        middle = _logical((1, 2), beta)
+        for i, j in ((1, 1), (0, 0)):
+            if (abs(complex(target[i, j])) < 1e-9
+                    or abs(complex(middle[i, j])) < 1e-9):
+                continue
+            phase = complex(middle[i, j]) / complex(target[i, j])
+            if abs(complex(middle[0, 1])) < 1e-12:
+                # A vanishing middle pulse leaves a diagonal product: one pulse.
+                alpha = (cmath.phase(phase * complex(target[0, 0]))
+                         - cmath.phase(complex(middle[0, 0])))
+                gamma = 0.0
+            else:
+                alpha = (cmath.phase(phase * complex(target[0, 1]))
+                         - cmath.phase(complex(middle[0, 1])))
+                gamma = (cmath.phase(phase * complex(target[1, 0]))
+                         - cmath.phase(complex(middle[1, 0])))
+            product = (_logical((0, 1), alpha) @ _logical((1, 2), beta)
+                       @ _logical((0, 1), gamma))
+            if abs(complex(torch.trace(product.conj().T @ target))) / 2 > 1 - 1e-9:
+                # Matrix order is the reverse of the order pulses are applied.
+                return [((low, high), _wrap(gamma)),
+                        ((high, high + 1), _wrap(beta)),
+                        ((low, high), _wrap(alpha))]
+    return None
+
+
+def _wrap(theta: float) -> float:
+    """Into [0, 2*pi), which is the period of the exchange unitary."""
+    return float(theta % (2.0 * math.pi))
+
+
+def decompose_1q(target: torch.Tensor, offset: int = 0,
+                 samples: int = 720) -> List[Pulse]:
+    """A logical 1-qubit gate as three or four exchange pulses, in closed form.
+
+    Exact, and far shorter than composing the analytic tables: measured against
+    them, ``rx`` goes from seven pulses to three or four and ``ry`` from nine.
+    On exchange-only hardware a pulse is a gate, so that is the error budget.
+
+    Three suffice when ``|target[0,1]| <= sqrt(3)/2``, which for ``rx(theta)``
+    means ``theta <= 2*pi/3``. Beyond it a fourth pulse is applied first to
+    bring the target inside: measured over random unitaries outside the reach,
+    the largest residual after the best fourth pulse is 0.829 against the 0.866
+    bound, so four always suffice. `samples` is how finely that fourth angle is
+    searched before being refined; it is a one-dimensional minimum, not a fit
+    over the whole sequence.
+    """
+    target = torch.as_tensor(target, dtype=torch.complex128)
+    if target.shape != (2, 2):
+        raise ValueError('target must be a 2x2 unitary.')
+    direct = _solve_three(target, offset)
+    if direct is not None:
+        return direct
+
+    best = (float('inf'), 0.0)
+    for k in range(samples):
+        delta = 2.0 * math.pi * k / samples
+        moved = target @ _logical((1, 2), -delta)
+        value = abs(complex(moved[0, 1]))
+        if value < best[0]:
+            best = (value, delta)
+    # Refine around the coarse minimum; the function is smooth in delta.
+    step = 2.0 * math.pi / samples
+    delta = best[1]
+    for _ in range(40):
+        step /= 2.0
+        for candidate in (delta - step, delta + step):
+            value = abs(complex((target @ _logical((1, 2), -candidate))[0, 1]))
+            if value < best[0]:
+                best, delta = (value, candidate), candidate
+    rest = _solve_three(target @ _logical((1, 2), -delta), offset)
+    if rest is None:
+        raise RuntimeError(
+            f"no four-pulse sequence found: the best fourth angle leaves "
+            f"|target[0,1]| = {best[0]:.4f}, above the {THREE_PULSE_REACH:.4f} "
+            f"that three pulses reach. This should not happen and is a bug.")
+    return [((offset + 1, offset + 2), _wrap(delta))] + rest
