@@ -35,6 +35,57 @@ if typing.TYPE_CHECKING:
 GLOBAL_MACROS = {}
 
 
+
+
+def _reverse_index_bits(values: torch.Tensor, n_qubits: int) -> torch.Tensor:
+    """Re-index so that qubit 0 is the most-significant bit of the index.
+
+    The values are unchanged; only which index they sit at moves. On a
+    symmetric distribution this is the identity, which is exactly why reading
+    the convention backwards can go unnoticed.
+    """
+    if n_qubits <= 1:
+        return values
+    index = torch.arange(values.shape[0], device=values.device)
+    swapped = torch.zeros_like(index)
+    for bit in range(n_qubits):
+        swapped |= ((index >> bit) & 1) << (n_qubits - 1 - bit)
+    return values[swapped]
+
+
+def _as_pauli_expression(hamiltonian: Any) -> Any:
+    """A Pauli expression, or a TypeError saying what one looks like.
+
+    Left as it is when it already is one. A string is parsed. Anything else --
+    a dict of coefficients is the common guess -- gets an error naming the
+    thing to pass, because the alternative is an AttributeError about
+    `simplify` from three frames down, which says nothing about Hamiltonians.
+    """
+    if hasattr(hamiltonian, 'to_expr'):
+        return hamiltonian.to_expr().simplify()
+    if hasattr(hamiltonian, 'simplify'):
+        return hamiltonian
+    if isinstance(hamiltonian, str):
+        from .utils import parse_hamiltonian
+        return parse_hamiltonian(hamiltonian).simplify()
+    raise TypeError(
+        f"a Hamiltonian is a Pauli expression, not {type(hamiltonian).__name__}. "
+        f"Build one from the operators exported at the top level -- "
+        f"`from blueqat import Z, X; Z[0] + 0.5 * X[1]` -- or pass the same "
+        f"thing as a string, \"Z[0] + 0.5*X[1]\".")
+
+
+def _hamiltonian_width(hamiltonian: Any) -> int:
+    """How many qubits a Pauli expression names, or 0 if it names none."""
+    highest = -1
+    for term in getattr(hamiltonian, 'terms', ()):
+        for op in getattr(term, 'ops', ()):
+            index = getattr(op, 'n', None)
+            if index is not None:
+                highest = max(highest, int(index))
+    return highest + 1
+
+
 class Circuit:
     """Store the gate operations and call the backends."""
     def __init__(self, n_qubits: int = 0, ops: Optional[list] = None):
@@ -177,15 +228,49 @@ class Circuit:
         from blueqat.backends.qasm_output_backend import QasmOutputBackend
         return QasmOutputBackend().run(self.ops, self.n_qubits, output_prologue=output_prologue)
 
-    def statevector(self, backend: 'BackendUnion' = None, **kwargs) -> torch.Tensor:
-        """Run the circuit and get a statevector as a PyTorch Tensor to keep gradients intact."""
+    def statevector(self, backend: 'BackendUnion' = None,
+                    bit_order: str = 'q0_last', **kwargs) -> torch.Tensor:
+        """Run the circuit and get a statevector as a PyTorch Tensor to keep
+        gradients intact.
+
+        Amplitude ``v[k]`` belongs to the basis state whose qubit ``q`` is bit
+        ``q`` of ``k`` -- qubit 0 is the *least*-significant bit of the index,
+        the same convention as everywhere else in the SDK and as
+        `blueqat.BIT_ORDER` reports. So for two qubits the order is |00>, |01>
+        with qubit 0 set, |10> with qubit 1 set, |11>.
+
+        Reading it the other way round is a mistake nothing catches: it gives
+        the mirror image of the answer, and on a symmetric state -- a GHZ, a W,
+        anything permutation-invariant -- the two agree, so it can go unnoticed
+        through a whole set of examples and fail on the one that is not
+        symmetric.
+
+        `bit_order='q0_first'` puts qubit 0 in the most-significant bit
+        instead, as some other toolkits do. It is the same argument name and
+        the same values that `run(shots=...)` and `probs()` take. Having it on
+        some of the three and not the others is itself the trap, because then
+        "I checked with run()" stops being an answer about the other two --
+        and before this it was worse than absent here: the argument was
+        accepted, validated, and then silently ignored, so asking for the
+        other convention returned the default one with nothing said."""
         if kwargs.get('returns'):
             raise ValueError('Circuit.statevector has no argument `returns`.')
+        # Imported here rather than at module scope: backendbase pulls in the
+        # backends package, which imports this module back.
+        from .backends.backendbase import BIT_ORDERS
+        if bit_order not in BIT_ORDERS:
+            raise ValueError(
+                f"bit_order must be one of {BIT_ORDERS}, got {bit_order!r}.")
         backend = self._resolve_backend(backend, kwargs)
 
         if hasattr(backend, 'statevector'):
-            return backend.statevector(self.ops, self.n_qubits, **kwargs)
-        return backend.run(self.ops, self.n_qubits, returns='statevector', **kwargs)
+            state = backend.statevector(self.ops, self.n_qubits, **kwargs)
+        else:
+            state = backend.run(self.ops, self.n_qubits, returns='statevector',
+                                **kwargs)
+        if bit_order == 'q0_first':
+            return _reverse_index_bits(state, self.n_qubits)
+        return state
 
     def shots(self, shots: int, backend: 'BackendUnion' = None, **kwargs) -> typing.Counter[str]:
         """Run the circuit and get shot counts as a result.
@@ -251,16 +336,27 @@ class Circuit:
         return collections.Counter(name for name, _ in self._expanded_applications())
 
     def probs(self, qubits: Optional[typing.Sequence[int]] = None,
-              backend: 'BackendUnion' = None, **kwargs) -> torch.Tensor:
+              backend: 'BackendUnion' = None, bit_order: str = 'q0_last',
+              **kwargs) -> torch.Tensor:
         """Measurement probabilities of the circuit's final state, optionally
         marginalized onto `qubits` (as in PennyLane's `qml.probs`).
 
-        Returns a tensor of length 2**len(qubits) where index bit j is the
-        outcome of `qubits[j]` (the first listed qubit is the least-significant
-        bit, matching the SDK-wide convention). Differentiable.
+        Returns a tensor of length 2**len(qubits). By default index bit j is
+        the outcome of `qubits[j]`: the first listed qubit is the
+        least-significant bit of the index, matching the SDK-wide convention
+        and what `blueqat.BIT_ORDER` reports. Differentiable.
+
+        `bit_order='q0_first'` reverses that, putting the first listed qubit in
+        the most-significant bit, which is what some other toolkits do. The
+        name and the values are the same ones `run(shots=...)` takes, so the
+        two do not have to be remembered separately.
 
         Under noise there is no statevector to square; the probabilities are the
         density matrix's diagonal, and are read from there."""
+        from .backends.backendbase import BIT_ORDERS
+        if bit_order not in BIT_ORDERS:
+            raise ValueError(
+                f"bit_order must be one of {BIT_ORDERS}, got {bit_order!r}.")
         resolved = self._resolve_backend(backend, kwargs)
         if getattr(resolved, 'returns_density_matrix', False):
             rho = resolved.run(self.ops, self.n_qubits, **kwargs)
@@ -268,7 +364,7 @@ class Circuit:
         else:
             p = torch.abs(self.statevector(backend, **kwargs)) ** 2
         if qubits is None:
-            return p
+            return _reverse_index_bits(p, self.n_qubits) if bit_order == 'q0_first' else p
         keep = list(qubits)
         if len(set(keep)) != len(keep):
             raise ValueError('qubits must not contain duplicates.')
@@ -286,13 +382,32 @@ class Circuit:
         # reshape(-1) makes the first axis most significant, so order axes as
         # [last listed qubit, ..., first listed qubit].
         t = t.permute([remaining.index(q) for q in reversed(keep)])
-        return t.reshape(-1)
+        marginal = t.reshape(-1)
+        if bit_order == 'q0_first':
+            marginal = _reverse_index_bits(marginal, len(keep))
+        return marginal
 
     def expect(self, hamiltonian: Any, backend: 'BackendUnion' = None, **kwargs) -> torch.Tensor:
         """Expectation value <psi|H|psi> of a Pauli-expression Hamiltonian on
-        the circuit's final state. Differentiable."""
-        if hasattr(hamiltonian, 'to_expr'):
-            hamiltonian = hamiltonian.to_expr().simplify()
+        the circuit's final state. Differentiable.
+
+        A Hamiltonian is a Pauli expression -- ``Z[0] + 0.5 * X[1]``, built from
+        the operators exported at the top level -- or a string
+        (``"Z[0] + 0.5*X[1]"``). A dict of coefficients is not one, and neither
+        is a matrix.
+
+        The circuit may be narrower than the Hamiltonian: qubits the circuit
+        never mentions are in |0>, which is a perfectly good state to take an
+        expectation in, and ``Circuit().expect(Z[0]) == 1`` rather than an
+        error about a zero-qubit state.
+        """
+        hamiltonian = _as_pauli_expression(hamiltonian)
+        width = _hamiltonian_width(hamiltonian)
+        if width > self.n_qubits:
+            # Widen a copy rather than this circuit: expect() is a question,
+            # and asking it should not change the thing being asked about.
+            widened = Circuit(width, list(self.ops))
+            return widened.run(backend, hamiltonian=hamiltonian, **kwargs)
         return self.run(backend, hamiltonian=hamiltonian, **kwargs)
 
     def exp_pauli(self, paulis: typing.Mapping[int, str], theta: Any) -> 'Circuit':

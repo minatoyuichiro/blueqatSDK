@@ -25,6 +25,11 @@ from blueqat.gate import Gate
 from blueqat.backends.backendbase import Backend, get_backend, register_backend
 from blueqat.backends.torch_backend import TorchBackend
 from blueqat.backends.draw_backend import DrawCircuit
+# The Pauli operators are how a Hamiltonian is written, which makes them a
+# main part of the surface rather than a utility. They lived only in
+# `blueqat.utils` -- a name that says "miscellany" -- and finding them there
+# was measured taking a new user fifteen minutes.
+from blueqat.utils import I, X, Y, Z, Expr, Term, parse_hamiltonian
 
 #: Which end of a counts key is qubit 0. blueqat writes ``"q0_last"``: the
 #: *rightmost* character is qubit 0, so ``Circuit(3).x[0].m[:].run(shots=1)``
@@ -85,6 +90,13 @@ def measure_bit_order() -> str:
 __all__ = [
     "__version__",
     "BIT_ORDER",
+    "I",
+    "X",
+    "Y",
+    "Z",
+    "Expr",
+    "Term",
+    "parse_hamiltonian",
     "measure_bit_order",
     "Circuit",
     "BlueqatGlobalSetting",
