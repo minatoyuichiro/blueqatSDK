@@ -1,7 +1,10 @@
 import math
+import warnings
+
 import pytest
 import torch
 from blueqat import Circuit
+import blueqat.backends.torch_backend as torch_backend
 from blueqat.backends.torch_backend import TorchBackend
 
 # =========================================================
@@ -116,3 +119,76 @@ def test_torch_backend_device_compatibility():
     # バックエンドから返ってきた出力が、NumpyではなくPyTorchのTensorオブジェクトであること
     assert isinstance(statevector, torch.Tensor)
     assert statevector.dtype == torch.complex128
+
+# --- the default backend's cost depends on the circuit, not the qubit count --
+#
+# `tensornet` is the default, and its memory use follows how the circuit is
+# wired. A circuit touching one register at both ends was measured taking 30 GB
+# at 19 qubits and being killed by the kernel, which leaves no traceback at all.
+# opt_einsum can price the contraction beforehand, so it is priced.
+
+def _all_to_all(n):
+    import itertools
+    circuit = Circuit(n)
+    for q in range(n):
+        circuit.h[q]
+    for a, b in itertools.combinations(range(n), 2):
+        circuit.cz[a, b]
+    return circuit
+
+
+def _resource_warnings(build, **kwargs):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        build().run(**kwargs)
+        return [w for w in caught if w.category is ResourceWarning]
+
+
+def test_an_ordinary_circuit_says_nothing():
+    """A chain contracts cheaply; warning about it would be noise."""
+    def build():
+        circuit = Circuit(14).h[0]
+        for q in range(13):
+            circuit.cx[q, q + 1]
+        return circuit
+    assert _resource_warnings(build, backend='tensornet', returns='statevector') == []
+
+
+def test_a_badly_connected_circuit_is_priced_before_it_is_run(monkeypatch):
+    """All-to-all connectivity is the case tensor networks are worst at. The
+    threshold is lowered here because at 16 qubits the real cost is only a few
+    megabytes -- the warning exists for the gigabyte case, and firing on this
+    one by default would be crying wolf."""
+    monkeypatch.setattr(torch_backend, 'CONTRACTION_WARN_BYTES', 1 << 20)
+    caught = _resource_warnings(lambda: _all_to_all(16),
+                                backend='tensornet', returns='statevector')
+    assert len(caught) == 1
+    message = str(caught[0].message)
+    assert 'statevector' in message
+    assert 'killed by the kernel' in message
+
+
+def test_the_same_circuit_is_quiet_at_the_real_threshold():
+    """Four megabytes is not what this is for."""
+    assert _resource_warnings(lambda: _all_to_all(16),
+                              backend='tensornet', returns='statevector') == []
+
+
+def test_pricing_never_changes_the_answer(monkeypatch):
+    """The check is advisory: it must not alter what comes back, or skip a run."""
+    monkeypatch.setattr(torch_backend, 'CONTRACTION_WARN_BYTES', 1)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        noisy = _all_to_all(8).run(backend='tensornet', returns='statevector')
+    exact = _all_to_all(8).run(backend='statevector', returns='statevector')
+    assert torch.allclose(noisy, exact, atol=1e-12)
+
+
+def test_a_failure_to_price_does_not_block_the_run(monkeypatch):
+    """Pricing is best effort. If opt_einsum cannot plan the path, the run
+    still has to happen."""
+    def explode(*args, **kwargs):
+        raise RuntimeError("no path for you")
+    monkeypatch.setattr(torch_backend.oe, 'contract_path', explode)
+    state = Circuit(3).h[0].cx[0, 1].run(backend='tensornet', returns='statevector')
+    assert state.shape == (8, )

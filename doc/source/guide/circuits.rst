@@ -139,9 +139,29 @@ out, so structured gates cost less without being special-cased: ``cx``, ``cz``,
 three.
 
 Six CX is not the optimal three, and on hardware -- where a CX budget of around
-fifteen decides whether a result survives -- that difference matters.
-:func:`~blueqat.decompose.synthesize_two_qubit` reaches three by fitting a
-three-CX circuit to the target with gradient descent instead of solving for it:
+fifteen decides whether a result survives -- that difference matters. There are
+two ways down, and they trade different things.
+
+``basis='cx'`` stays exact and costs four:
+
+.. code-block:: python
+
+   decompose_two_qubit(matrix, basis='cx')   # four CX, still exact
+   decompose_unitary(matrix, basis='cx')     # and for any number of qubits
+
+Under CX conjugation an ``rx`` on one wire becomes an XX term and an ``rz`` on
+the other becomes a ZZ term, so a *single* CX sandwich carries both at once.
+The three interaction terms commute, so they split into (XX, ZZ) and (YY):
+two sandwiches, four CX, against six. YY is the odd one out -- nothing in the
+sandwich maps to it -- and conjugating the XX sandwich by ``s`` supplies it,
+since ``S X S^H == Y``. A gate with no YY content is cheaper still: ``cx``,
+``cz`` and ``zz`` cost two, the identity none. Across a whole Shannon
+decomposition the saving compounds: 36 CX to 28 at three qubits, 168 to 136 at
+four.
+
+:func:`~blueqat.decompose.synthesize_two_qubit` reaches the optimal three, but
+by fitting a three-CX circuit to the target with gradient descent rather than
+solving for it:
 
 .. code-block:: python
 
@@ -150,8 +170,11 @@ three-CX circuit to the target with gradient descent instead of solving for it:
    synthesize_two_qubit(matrix)              # exactly three CX
 
 The fit is checked, not assumed: it must reach an infidelity below ``tol`` or
-the call raises. Prefer the closed form when exactness matters more than the
-gate count, and this when the circuit is bound for a device.
+the call raises. Note what ``tol`` bounds, though -- an infidelity, not the
+matrix. At the default the individual amplitudes land about ``1e-7`` from the
+target, and tightening ``tol`` to ``1e-14`` only reaches ``1e-8``: a fit does
+not get to machine precision. So: ``basis='cx'`` when the numbers matter,
+``synthesize_two_qubit`` when the last CX does.
 
 Larger unitaries and isometries
 -------------------------------

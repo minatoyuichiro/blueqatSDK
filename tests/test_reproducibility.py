@@ -262,3 +262,196 @@ def test_vqe_seed_reseeds_a_seedable_sampler():
     sampler.set_seed(5)
     assert sampler(c, range(3)) == first
     assert vqe.sampler is sampler
+
+
+# --- which end of a counts key is qubit 0 ----------------------------------
+#
+# blueqat 2.0.4's numpy and numba backends put qubit 0 at the *left*, giving
+# '100' where this gives '001' for the same circuit -- the mirror image, with
+# no error and no warning. Both versions call themselves blueqat, so code that
+# reads a bitstring is version-dependent in a way nothing announces. The
+# convention is exported so a caller can assert it and fail loudly on a version
+# that would answer backwards.
+
+def test_qubit_zero_is_the_last_character():
+    import blueqat
+    circuit = Circuit(3)
+    circuit.x[0]
+    assert dict(circuit.m[:].run(shots=1)) == {'001': 1}
+    assert blueqat.BIT_ORDER == 'q0_last'
+
+
+def test_every_backend_agrees_on_the_bit_order():
+    """Choosing a backend must not change which end is which -- that is exactly
+    the failure being guarded against."""
+    import blueqat
+    for backend in ('statevector', 'tensornet'):
+        circuit = Circuit(3)
+        circuit.x[0]
+        assert dict(circuit.m[:].run(backend=backend, shots=1)) == {'001': 1}, backend
+    assert blueqat.BIT_ORDER == 'q0_last'
+
+
+def test_the_convention_is_exported_so_a_guard_is_one_line():
+    import blueqat
+    assert 'BIT_ORDER' in blueqat.__all__
+    assert blueqat.BIT_ORDER in ('q0_last', 'q0_first')
+
+
+def test_the_measured_order_agrees_with_the_declared_one():
+    """If these ever disagree, the constant is lying and every guard built on
+    it is wrong."""
+    import blueqat
+    assert blueqat.measure_bit_order() == blueqat.BIT_ORDER
+
+
+def test_measuring_works_where_the_constant_would_not_exist():
+    """The constant was added after 2.1.3 shipped, so an installed 2.1.3 --
+    which answers q0_last, correctly -- has no attribute to read. Treating its
+    absence as "old and wrong" would reject a working install; measuring is
+    right about whatever is actually there."""
+    import blueqat
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.delattr(blueqat, 'BIT_ORDER')
+    try:
+        order = getattr(blueqat, 'BIT_ORDER', None) or blueqat.measure_bit_order()
+        assert order == 'q0_last'
+    finally:
+        monkeypatch.undo()
+    assert blueqat.BIT_ORDER == 'q0_last'
+
+
+def test_the_documented_two_liner_gives_the_same_answer():
+    """Code that cannot import measure_bit_order copies these two lines, so
+    they have to stay correct."""
+    import blueqat
+    circuit = Circuit(3)
+    circuit.x[0]
+    order = "q0_last" if "001" in circuit.m[:].run(shots=1) else "q0_first"
+    assert order == blueqat.BIT_ORDER
+
+
+# --- asking for an expectation value ---------------------------------------
+
+def test_a_hamiltonian_that_is_not_one_says_what_one_looks_like():
+    """The old failure was `AttributeError: 'dict' object has no attribute
+    'simplify'` from three frames down, which says nothing about
+    Hamiltonians."""
+    with pytest.raises(TypeError) as exc:
+        Circuit(1).expect({'Z0': 1.0})
+    message = str(exc.value)
+    assert 'Pauli expression' in message
+    assert 'from blueqat import Z' in message
+
+
+def test_a_hamiltonian_can_be_written_as_a_string():
+    from blueqat import Z
+    assert Circuit(2).x[0].expect('Z[0] + 0.5*Z[1]') == pytest.approx(-0.5)
+    assert Circuit(2).x[0].expect(Z[0]) == pytest.approx(-1.0)
+
+
+def test_the_do_nothing_state_has_an_expectation_value():
+    """It is the first thing anyone measures, and it used to raise about a
+    zero-qubit state. Qubits the circuit never mentions are in |0>."""
+    from blueqat import Z
+    assert Circuit().expect(Z[0]) == pytest.approx(1.0)
+    assert Circuit(1).h[0].expect(Z[1]) == pytest.approx(1.0)
+
+
+def test_asking_does_not_widen_the_circuit_being_asked_about():
+    from blueqat import Z
+    circuit = Circuit(1).h[0]
+    circuit.expect(Z[3])
+    assert circuit.n_qubits == 1
+
+
+def test_the_pauli_operators_are_exported_at_the_top_level():
+    """They are how a Hamiltonian is written, so they belong on the surface
+    rather than only in a module named for miscellany."""
+    import blueqat
+    for name in ('I', 'X', 'Y', 'Z', 'Expr', 'Term', 'parse_hamiltonian'):
+        assert hasattr(blueqat, name), name
+        assert name in blueqat.__all__, name
+    from blueqat import X, Z
+    assert Circuit(2).x[0].expect(Z[0] + 0.5 * X[1]) == pytest.approx(-1.0)
+
+
+# --- probs() and run(shots=) agree about which end is which ----------------
+
+def test_probs_takes_the_same_bit_order_argument_as_run():
+    """One of them having the argument and the other not is how a reader ends
+    up believing they differ."""
+    circuit = Circuit(3).x[0]
+    default = circuit.probs()
+    assert int(default.argmax()) == 1                  # index 1 == 001
+    reversed_ = circuit.probs(bit_order='q0_first')
+    assert int(reversed_.argmax()) == 4                # index 4 == 100
+    assert float(reversed_.sum()) == pytest.approx(1.0)
+
+    counts = Circuit(3).x[0].m[:].run(shots=1)
+    assert list(counts) == ['001']
+    counts = Circuit(3).x[0].m[:].run(shots=1, bit_order='q0_first')
+    assert list(counts) == ['100']
+
+
+def test_the_bit_order_applies_to_a_marginal_too():
+    circuit = Circuit(3).x[0]
+    assert circuit.probs([0, 1]).tolist() == [0.0, 1.0, 0.0, 0.0]
+    assert circuit.probs([0, 1], bit_order='q0_first').tolist() == [0.0, 0.0, 1.0, 0.0]
+
+
+def test_an_unknown_bit_order_is_refused():
+    with pytest.raises(ValueError, match="q0_last.*q0_first"):
+        Circuit(2).h[0].probs(bit_order='big_endian')
+
+
+def test_reversing_is_the_identity_on_a_symmetric_state():
+    """Which is precisely why reading the convention backwards survives a
+    whole set of examples and then fails on the one that is not symmetric."""
+    ghz = Circuit(3).h[0].cx[0, 1].cx[1, 2]
+    assert torch.allclose(ghz.probs(), ghz.probs(bit_order='q0_first'))
+    asymmetric = Circuit(3).x[0]
+    assert not torch.allclose(asymmetric.probs(),
+                              asymmetric.probs(bit_order='q0_first'))
+
+
+def test_the_statevector_says_which_end_is_qubit_zero():
+    """It said nothing at all, in 83 characters."""
+    doc = Circuit.statevector.__doc__
+    assert 'least' in doc and 'significant' in doc
+    state = Circuit(2).x[0].run()
+    assert int(torch.abs(state).argmax()) == 1        # |01>, qubit 0 set
+
+
+def test_statevector_honours_bit_order_rather_than_accepting_and_ignoring_it():
+    """Worse than absent, before this: the argument was accepted and even
+    validated, then silently ignored, so asking for the other convention
+    returned the default one with nothing said."""
+    circuit = Circuit(3).x[0]
+    default = circuit.statevector()
+    reversed_ = circuit.statevector(bit_order='q0_first')
+    assert int(torch.abs(default).argmax()) == 1        # 001
+    assert int(torch.abs(reversed_).argmax()) == 4      # 100
+    assert not torch.allclose(default, reversed_)
+    assert float((torch.abs(reversed_) ** 2).sum()) == pytest.approx(1.0)
+
+
+def test_all_three_ways_of_reading_a_state_take_the_same_argument():
+    """Having it on some and not the others is the trap: "I checked with
+    run()" then stops being an answer about the other two."""
+    import inspect
+    for name in ('statevector', 'probs'):
+        assert 'bit_order' in inspect.signature(getattr(Circuit, name)).parameters
+        with pytest.raises(ValueError, match='bit_order must be one of'):
+            getattr(Circuit(2).h[0], name)(bit_order='big_endian')
+    # run() takes it as a keyword, and all three agree on the same circuit.
+    assert list(Circuit(3).x[0].m[:].run(shots=1, bit_order='q0_first')) == ['100']
+    assert int(Circuit(3).x[0].probs(bit_order='q0_first').argmax()) == 4
+    assert int(torch.abs(Circuit(3).x[0].statevector(bit_order='q0_first')).argmax()) == 4
+
+
+def test_reversing_the_statevector_keeps_the_gradient():
+    angle = torch.tensor(0.3, requires_grad=True)
+    state = Circuit(2).ry(angle)[0].statevector(bit_order='q0_first')
+    (torch.abs(state) ** 2).sum().backward()
+    assert angle.grad is not None

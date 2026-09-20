@@ -152,8 +152,185 @@ def _parse_targets(targets_str: str,
     return targets
 
 
-def from_qasm(qasm: str) -> Circuit:
-    """Parse an OpenQASM 2.0 program (the qelib1.inc gate set) into a Circuit."""
+def look_alike_characters(text: str) -> Dict[str, str]:
+    """Characters that are not what they look like, and what they should be.
+
+    Text pasted out of a PDF or a word processor carries characters that render
+    identically to ASCII or to an ordinary ideograph but are different code
+    points -- full-width punctuation and digits, and the 214 Kangxi radicals,
+    where ``子`` (U+5B50) and ``⼦`` (U+2F26) are indistinguishable on screen. A
+    program carrying them fails to parse for a reason nobody can see by looking.
+
+    Returns ``{character: what it normalizes to}`` for each distinct
+    character NFKC would change.
+
+    ⚠ That is a wide net, and using it as a "this text is damaged" test gives
+    false positives on perfectly good Japanese. Full-width brackets and colons
+    are correct typography; NFKC also turns ``①`` into ``1``, ``㎡`` into
+    ``m2``, ``Ⅳ`` into ``IV`` and ``…`` into ``...``, none of which is a
+    repair. Use `always_wrong_characters` to ask whether something is broken;
+    use this one to describe what is there.
+    """
+    import unicodedata
+    out: Dict[str, str] = {}
+    for ch in text:
+        if ord(ch) < 128:
+            continue
+        replacement = unicodedata.normalize('NFKC', ch)
+        if replacement != ch:
+            out[ch] = replacement
+    return out
+
+
+#: The one range whose members can be called damage on sight. Their Unicode
+#: names say what they are -- KANGXI RADICAL CHILD, KANGXI RADICAL TALL -- so a
+#: character from a radical table appearing in running prose is not something
+#: anyone chose. All 214 normalize onto an ordinary ideograph.
+#:
+#: ⚠ Even here, "safe to repair in stored text" depends on where the text came
+#: from. Extracted from a PDF, one of these is an accident. Typed by a person
+#: or produced by a model, it is what they entered, and rewriting it is
+#: rewriting them. The character alone does not settle it.
+EXTRACTION_DAMAGE_RANGES = (
+    (0x2F00, 0x2FD5),      # Kangxi radicals
+)
+
+#: Look-alikes that may be exactly what someone meant. Normalize these into a
+#: *search index*, never in the stored text.
+#:
+#: The compatibility ideographs are the trap. Their names say nothing --
+#: CJK COMPATIBILITY IDEOGRAPH-FA10 -- and they normalize onto 塚, 晴 and 祥,
+#: which is to say onto characters that appear in people's names. A document
+#: carrying one may be spelling somebody's name correctly, and repairing the
+#: stored text would spell it wrong.
+#:
+#: Full-width letters are the registered form of some company names and appear
+#: in quotations that must not be altered; half-width kana is a presentation
+#: choice. The three full-width intervals are listed separately on purpose:
+#: FF10-FF5A as one span would swallow the full-width colon, question mark and
+#: brackets, which are ordinary Japanese punctuation.
+PRESENTATION_RANGES = (
+    (0xF900, 0xFAFF),      # CJK compatibility ideographs
+    (0xFF10, 0xFF19),      # full-width 0-9
+    (0xFF21, 0xFF3A),      # full-width A-Z
+    (0xFF41, 0xFF5A),      # full-width a-z
+    (0xFF61, 0xFF9F),      # half-width kana
+)
+
+#: Both, which is what a *program* cares about: QASM is ASCII by definition, so
+#: the question of whether a character was intended does not arise inside one.
+LOOK_ALIKE_RANGES = EXTRACTION_DAMAGE_RANGES + PRESENTATION_RANGES
+
+
+def _in_ranges(text: str, ranges, repairable: bool = True) -> Dict[str, str]:
+    import unicodedata
+    out: Dict[str, str] = {}
+    for ch in text:
+        if not any(low <= ord(ch) <= high for low, high in ranges):
+            continue
+        replacement = unicodedata.normalize('NFKC', ch)
+        if (replacement != ch) == repairable:
+            out[ch] = replacement
+    return out
+
+
+def extraction_damage(text: str) -> Dict[str, str]:
+    """Kangxi radicals, which say in their own names that they are misplaced.
+
+    U+2F26 renders exactly like U+5B50 and is a different character, so a
+    document carrying it cannot be searched for its own words.
+
+    ⚠ Whether repairing the stored text is right still depends on where the
+    text came from: extracted from a document, one of these is an accident;
+    typed by a person or emitted by a model, it is their input. Normalizing a
+    search index is always safe and achieves the searching either way.
+    """
+    return _in_ranges(text, EXTRACTION_DAMAGE_RANGES)
+
+
+def presentation_variants(text: str) -> Dict[str, str]:
+    """Look-alikes that may be deliberate. Normalize an index, not the text.
+
+    Compatibility ideographs normalize onto characters that appear in people's
+    names -- U+FA10, U+FA12 and U+FA1A onto 塚, 晴 and 祥 -- so a document
+    carrying one may be spelling a name correctly. Full-width letters are the
+    registered form of some company names and appear inside quotations. Nothing
+    here can tell an intentional one from an accident, so rewriting the stored
+    text changes names and misquotes sources. Normalize both the index and the
+    query instead, and leave the text as it was written.
+    """
+    return _in_ranges(text, PRESENTATION_RANGES)
+
+
+def always_wrong_characters(text: str) -> Dict[str, str]:
+    """Every look-alike, damage or presentation, with its repair.
+
+    The union of `extraction_damage` and `presentation_variants`. Right for a
+    program -- QASM is ASCII, so anything here is a mistake in one -- and the
+    wrong question for prose, where the two halves want opposite treatment.
+
+    Only characters NFKC actually changes are returned. Reporting one whose
+    normalized form is itself would be naming a problem and offering the
+    problem as its own solution; see `unfixable_lookalikes`.
+    """
+    return _in_ranges(text, LOOK_ALIKE_RANGES)
+
+
+def unfixable_lookalikes(text: str) -> Dict[str, str]:
+    """Look-alikes that normalizing will *not* resolve.
+
+    Twelve compatibility ideographs -- U+FA0E, FA0F, FA11, FA13, FA14, FA1F,
+    FA21, FA23, FA24, FA27, FA28 and FA29 -- normalize to themselves, so U+FA11
+    and U+5D0E stay different after NFKC on both sides. Variant forms of a
+    personal name are the usual way to meet them, and they need a different
+    answer entirely.
+
+    ⚠ These are not the whole of the problem, only the part that is in range.
+    Ordinary variant ideographs -- U+9AD9 against U+9AD8, say -- are not
+    compatibility characters at all and no normalization touches them. Matching
+    people by name does not close either way; matching them by identifier does.
+
+    Returned as ``{character: itself}`` so that "found it" and "fixed it" stay
+    distinguishable: calling a normalization pass a resolution here is how the
+    same report comes back a second time.
+    """
+    return _in_ranges(text, LOOK_ALIKE_RANGES, repairable=False)
+
+
+def _look_alike_note(text: str) -> str:
+    """A sentence naming the look-alikes in `text`, or nothing."""
+    offenders = look_alike_characters(text)
+    if not offenders:
+        return ""
+    shown = ', '.join(f"{ch!r} (U+{ord(ch):04X}) for {want!r}"
+                      for ch, want in list(offenders.items())[:4])
+    more = '' if len(offenders) <= 4 else f", and {len(offenders) - 4} more"
+    return (f" The program contains characters that look like ASCII but are "
+            f"not: {shown}{more}. Text pasted from a PDF or a word processor "
+            f"does this. Pass normalize=True to from_qasm, or run the source "
+            f"through unicodedata.normalize('NFKC', ...) first.")
+
+
+def from_qasm(qasm: str, normalize: bool = False) -> Circuit:
+    """Parse an OpenQASM 2.0 program (the qelib1.inc gate set) into a Circuit.
+
+    `normalize` applies NFKC first, folding full-width punctuation and Kangxi
+    radicals onto their ASCII and ideographic equivalents. It is off by default
+    because silently rewriting input is a guess at what was meant; when parsing
+    fails, the error says whether such characters are present, which is
+    something no amount of looking at the text will reveal.
+    """
+    import unicodedata
+    if normalize:
+        qasm = unicodedata.normalize('NFKC', qasm)
+    try:
+        return _parse_program(qasm)
+    except ValueError as e:
+        note = _look_alike_note(qasm)
+        raise ValueError(f"{e}{note}") from None
+
+
+def _parse_program(qasm: str) -> Circuit:
     # strip line (//) and block (/* */) comments
     text = re.sub(r'/\*.*?\*/', '', qasm, flags=re.DOTALL)
     text = re.sub(r'//.*', '', text)
