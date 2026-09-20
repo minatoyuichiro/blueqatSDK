@@ -512,3 +512,73 @@ def test_the_tables_stay_the_default():
     circuit = Circuit(1).rx(0.3)[0]
     assert len(circuit.run(backend='eo').ops) == 7
     assert len(circuit.run(backend='eo', shortest=True).ops) == 3
+
+
+# --- merging a run before solving it ---------------------------------------
+#
+# Solving one gate at a time leaves most of the saving on the table: five
+# consecutive gates cost sixteen pulses that way and four as a single matrix.
+# And a run that cancels costs nothing at all.
+
+def _two_qubit_block(circuit):
+    import torch
+    from blueqat.circuit_funcs import circuit_to_unitary
+    from blueqat.eo.encoding import codeword_basis
+    basis = codeword_basis('+')
+    pair = torch.kron(basis, basis)
+    unitary = torch.as_tensor(circuit_to_unitary(circuit), dtype=torch.complex128)
+    return pair.conj().T @ unitary @ pair
+
+
+def test_a_run_of_one_qubit_gates_is_solved_as_one_matrix():
+    circuit = Circuit(1).rx(0.3)[0].ry(1.0)[0].h[0].rz(0.7)[0].x[0]
+    tables = circuit.run(backend='eo')
+    solved = circuit.run(backend='eo', shortest=True)
+    assert len(tables.ops) == 23
+    assert len(solved.ops) == 4
+    assert _fidelity(_logical_of([((i, j), t) for (i, j), t
+                                  in [(op.targets, op.theta) for op in tables.ops]]),
+                     [(op.targets, op.theta) for op in solved.ops]) == pytest.approx(1.0, abs=1e-9)
+
+
+@pytest.mark.parametrize('build', [
+    lambda: Circuit(1).x[0].x[0],
+    lambda: Circuit(1).h[0].h[0],
+    lambda: Circuit(1).s[0].s[0].s[0].s[0],
+])
+def test_a_run_that_cancels_costs_nothing(build):
+    """It cost a full table entry per gate before."""
+    circuit = build()
+    assert len(circuit.run(backend='eo').ops) > 0
+    assert len(circuit.run(backend='eo', shortest=True).ops) == 0
+
+
+def test_a_two_qubit_gate_ends_the_run_it_touches():
+    """Anything else would reorder gates that do not commute."""
+    circuit = Circuit(2).rx(0.3)[0].ry(1.0)[0].cx[0, 1].h[1].rz(0.7)[1].t[1]
+    tables = circuit.run(backend='eo')
+    solved = circuit.run(backend='eo', shortest=True)
+    assert len(solved.ops) < len(tables.ops)
+    overlap = abs(torch.trace(_two_qubit_block(tables).conj().T
+                              @ _two_qubit_block(solved))) / 4
+    assert float(overlap) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_the_merged_result_is_the_circuit_that_was_asked_for():
+    """Against the ideal unitary, not only against the other transpilation."""
+    from blueqat.circuit_funcs import circuit_to_unitary
+    circuit = Circuit(2).rx(0.3)[0].ry(1.0)[0].cx[0, 1].h[1].rz(0.7)[1].t[1]
+    ideal = torch.as_tensor(circuit_to_unitary(circuit), dtype=torch.complex128)
+    block = _two_qubit_block(circuit.run(backend='eo', shortest=True))
+    assert float(abs(torch.trace(ideal.conj().T @ block)) / 4) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_runs_on_different_qubits_do_not_interleave():
+    """Sound because exchange pulses on disjoint triples commute -- but the
+    pulses still have to land on the right triples."""
+    circuit = Circuit(2).rx(0.3)[0].ry(1.0)[1].h[0].t[1]
+    solved = circuit.run(backend='eo', shortest=True)
+    triples = {0: set(range(0, 3)), 1: set(range(3, 6))}
+    for op in solved.ops:
+        i, j = op.targets
+        assert any({i, j} <= spins for spins in triples.values())

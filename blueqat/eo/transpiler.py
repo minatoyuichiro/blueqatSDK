@@ -29,7 +29,7 @@ orientation assignment and spin-level SWAP routing, which is future work
 (cf. exchange-pulse-optimizer).
 """
 
-from typing import Any, List
+from typing import Any, List, Optional
 
 from ..backends.backendbase import Backend, register_backend
 from ..circuit import Circuit
@@ -71,6 +71,19 @@ class EOTranspiler(Backend):
         from ..gate import GateBlock
         shortest = bool(kwargs.get('shortest', False))
         pulses: List[sequences.Pulse] = []
+        # With `shortest`, consecutive one-qubit gates on the same logical
+        # qubit are multiplied together and solved once. Solving them one at a
+        # time is what makes a run expensive: measured, five gates cost sixteen
+        # pulses that way and four as a single matrix. Runs on different
+        # triples are not interleaved here, which is sound because exchange
+        # pulses on disjoint triples commute.
+        pending: dict = {}
+
+        def flush(qubit: Optional[int] = None) -> None:
+            for target in (sorted(pending) if qubit is None
+                           else ([qubit] if qubit in pending else [])):
+                pulses.extend(self._solve_matrix(pending.pop(target), 3 * target))
+
         for gate in gates:
             name = gate.lowername
             if isinstance(gate, GateBlock):
@@ -85,49 +98,65 @@ class EOTranspiler(Backend):
             if name in self._FIXED or name in self._ROTATIONS:
                 for t in gate.target_iter(n_qubits):
                     if shortest:
-                        pulses += self._solve(gate, name, 3 * t, n_qubits)
+                        matrix = _matrix_of(gate)
+                        pending[t] = (matrix if t not in pending
+                                      else matrix @ pending[t])
                     elif name in self._FIXED:
                         pulses += self._FIXED[name](offset=3 * t)
                     else:
                         pulses += self._ROTATIONS[name](gate.theta, offset=3 * t)
             elif name == 'cx':
                 for c, t in gate.control_target_iter(n_qubits):
+                    flush(c); flush(t)
                     pulses += sequences.cx_sequence(3 * c, 3 * t)
             elif name == 'cz':
                 for c, t in gate.control_target_iter(n_qubits):
+                    flush(c); flush(t)
                     pulses += sequences.cz_sequence(3 * c, 3 * t)
             elif name == 'swap':
                 for a, b in gate.control_target_iter(n_qubits):
+                    flush(a); flush(b)
                     pulses += sequences.swap_sequence(3 * a, 3 * b)
             else:
                 raise ValueError(
                     f"Gate '{name}' is not supported by the exchange-only "
                     "transpiler. Decompose it into "
                     "x/y/z/h/s/t/rx/ry/rz/cx/cz/swap first.")
+        flush()
         return sequences.sequence_to_circuit(pulses, 3 * n_qubits)
 
     @staticmethod
-    def _solve(gate: Operation, name: str, offset: int,
-               n_qubits: int) -> List[sequences.Pulse]:
-        """One single-qubit gate, solved directly from its matrix."""
+    def _solve_matrix(matrix, offset: int) -> List[sequences.Pulse]:
+        """One accumulated one-qubit matrix, solved directly.
+
+        An accumulated identity needs no pulses at all. That is worth stating
+        rather than leaving to arithmetic: a run that cancels out costs nothing
+        here, and cost a full table entry per gate before.
+        """
         import torch
-        from ..circuit import Circuit
-        from ..circuit_funcs import circuit_to_unitary
         from .optimizer import decompose_1q
-        single = Circuit(1)
-        single.ops.append(gate.__class__((0, ), *gate.params_iter())
-                          if False else _retargeted(gate))
-        matrix = torch.as_tensor(circuit_to_unitary(single),
-                                 dtype=torch.complex128)
+        eye = torch.eye(2, dtype=torch.complex128)
+        head = complex(matrix[0, 0])
+        if abs(head) < 1e-12:
+            head = complex(matrix[0, 1])
+        if abs(head) > 1e-12:
+            aligned = matrix * (abs(head) / head)
+            if torch.allclose(aligned, eye, atol=1e-12):
+                return []
         return decompose_1q(matrix, offset=offset)
 
 
-def _retargeted(gate: Operation) -> Operation:
-    """A copy of a one-qubit gate acting on qubit 0, for reading its matrix."""
+def _matrix_of(gate: Operation):
+    """The 2x2 matrix of a one-qubit gate, read by running it on one qubit."""
     import copy
+    import torch
+    from ..circuit import Circuit
+    from ..circuit_funcs import circuit_to_unitary
     moved = copy.copy(gate)
     moved.targets = (0, )
-    return moved
+    single = Circuit(1)
+    single.ops.append(moved)
+    return torch.as_tensor(circuit_to_unitary(single), dtype=torch.complex128)
 
 
 register_backend('eo', EOTranspiler, overwrite=True)
