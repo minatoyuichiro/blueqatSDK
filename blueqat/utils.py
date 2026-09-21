@@ -507,15 +507,109 @@ def parse_hamiltonian(text: str) -> Expr:
 
 
 def qubo_bit(n: int) -> Expr:
+    """The binary variable ``x[n]`` as a Pauli expression: ``(1 - Z[n]) / 2``.
+
+    ``x = 0`` is the ``|0>`` state and ``x = 1`` is ``|1>``, so a QUBO written
+    in binary variables becomes a Hamiltonian whose ground state is the
+    minimizing assignment.
+    """
     return 0.5 - 0.5 * Z[n]
 
-def from_qubo(qubo: Sequence[Sequence[float]]) -> Expr:
-    h = 0.0
+
+def from_qubo(qubo: Any) -> Expr:
+    """A QUBO as a Pauli expression, ready for `QaoaAnsatz`.
+
+    Accepts either an upper- or lower-triangular (or full) square matrix::
+
+        from_qubo([[1, -2],
+                   [0,  3]])          # x0 + 3 x1 - 2 x0 x1
+
+    or the sparse dictionary form, which is how a QUBO is usually written down
+    and which the matrix form makes awkward for anything large::
+
+        from_qubo({(0, 0): 1, (1, 1): 3, (0, 1): -2})
+
+    Off-diagonal entries are summed across the two triangles, so ``(i, j)`` and
+    ``(j, i)`` both contribute and it does not matter which one is used.
+
+    The result is a `blueqat.Expr` of Z operators; ``expr.to_matrix()`` gives
+    the dense operator, whose smallest eigenvalue is the QUBO's minimum.
+    """
+    if hasattr(qubo, 'items'):
+        return _from_qubo_dict(qubo)
+    h: Any = 0.0
     for i in range(len(qubo)):
         h += qubo_bit(i) * qubo[i][i]
         for j in range(i + 1, len(qubo)):
             h += qubo_bit(i) * qubo_bit(j) * (qubo[i][j] + qubo[j][i])
     return h
+
+
+def _from_qubo_dict(qubo: Dict[Tuple[int, int], float]) -> Expr:
+    """`from_qubo` for ``{(i, j): weight}``."""
+    weights: Dict[Tuple[int, int], float] = defaultdict(float)
+    for key, value in qubo.items():
+        try:
+            i, j = key
+        except (TypeError, ValueError):
+            raise TypeError(
+                f"a QUBO dictionary is keyed by pairs of variables, "
+                f"{{(0, 1): -2.0, ...}}; got the key {key!r}.") from None
+        i, j = int(i), int(j)
+        if i < 0 or j < 0:
+            raise ValueError(f"variable indices must be non-negative, got {key!r}.")
+        weights[(min(i, j), max(i, j))] += float(value)
+    h: Any = 0.0
+    for (i, j), value in sorted(weights.items()):
+        if value == 0.0:
+            continue
+        h += (qubo_bit(i) * value if i == j
+              else qubo_bit(i) * qubo_bit(j) * value)
+    return h if not isinstance(h, float) else Expr.zero() + h
+
+
+def ground_state_energy(hamiltonian: Any) -> float:
+    """The exact lowest eigenvalue, by diagonalizing the dense operator.
+
+    The reference a variational answer is checked against. It is one line on
+    top of `Expr.to_matrix`, and it is here because that one line is the
+    difference between a VQE result that has been verified and one that has
+    only converged -- and because writing it out invites each caller to choose
+    a slightly different convention for what "the Hamiltonian" was.
+
+    Costs ``4**n`` memory, so it is for the small problems where an exact
+    answer is the point.
+    """
+    import torch as _torch
+    expression = parse_hamiltonian(hamiltonian) if isinstance(hamiltonian, str) \
+        else hamiltonian
+    if hasattr(expression, 'to_expr'):
+        expression = expression.to_expr()
+    matrix = expression.to_matrix()
+    return float(_torch.linalg.eigvalsh(matrix).min().real)
+
+
+def exhaustive_minimum(qubo: Any) -> Tuple[float, Tuple[int, ...]]:
+    """The QUBO's true minimum and a bitstring achieving it, by trying all.
+
+    Returns ``(value, bits)`` with ``bits[i]`` the value of variable ``i``.
+    ``2**n`` evaluations, so it is for checking a heuristic on a small
+    instance rather than for solving anything.
+
+    Ties are resolved toward the first assignment found in counting order,
+    which is arbitrary but fixed: a solver that finds a different optimum of
+    equal value has not disagreed with this one.
+    """
+    expression = from_qubo(qubo)
+    if hasattr(expression, 'to_expr'):
+        expression = expression.to_expr()
+    matrix = expression.to_matrix()
+    import torch as _torch
+    diagonal = _torch.diagonal(matrix).real
+    index = int(_torch.argmin(diagonal))
+    n_qubits = int(round(math.log2(matrix.shape[0])))
+    return (float(diagonal[index]),
+            tuple((index >> q) & 1 for q in range(n_qubits)))
 
 
 # ==============================================================================

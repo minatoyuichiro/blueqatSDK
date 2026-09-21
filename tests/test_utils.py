@@ -14,6 +14,7 @@
 
 from collections import Counter
 import pytest
+import torch
 from blueqat.utils import to_inttuple
 
 @pytest.mark.parametrize('arg, expect', [
@@ -101,3 +102,76 @@ def test_random_unitary_rejects_a_bad_dimension():
     from blueqat.utils import random_unitary
     with pytest.raises(ValueError):
         random_unitary(0)
+
+
+# --- writing a QUBO down, and checking the answer --------------------------
+#
+# `from_qubo` existed and had no docstring, so a session that needed it wrote
+# its own instead. The gap was discoverability, not capability.
+
+def test_a_qubo_can_be_written_as_a_dictionary():
+    """Which is how one is usually written down; the matrix form is awkward
+    for anything sparse."""
+    from blueqat import from_qubo
+    matrix_form = from_qubo([[1, -2], [0, 3]])
+    dict_form = from_qubo({(0, 0): 1, (1, 1): 3, (0, 1): -2})
+    assert torch.allclose(matrix_form.to_matrix(), dict_form.to_matrix())
+
+
+def test_the_two_triangles_are_summed():
+    """So it does not matter which of (i, j) and (j, i) a caller uses."""
+    from blueqat import from_qubo
+    split = from_qubo({(0, 1): -1, (1, 0): -1})
+    whole = from_qubo({(0, 1): -2})
+    assert torch.allclose(split.to_matrix(), whole.to_matrix())
+
+
+def test_a_malformed_qubo_key_says_what_a_key_looks_like():
+    from blueqat import from_qubo
+    with pytest.raises(TypeError, match='keyed by pairs'):
+        from_qubo({0: 1.0})
+    with pytest.raises(ValueError, match='non-negative'):
+        from_qubo({(-1, 0): 1.0})
+
+
+def test_the_exact_ground_state_energy():
+    from blueqat import Z, ground_state_energy
+    assert ground_state_energy(Z[0] * Z[1] + 0.5 * Z[0]) == pytest.approx(-1.5)
+    assert ground_state_energy('Z[0]*Z[1] + 0.5*Z[0]') == pytest.approx(-1.5)
+
+
+def test_the_ground_state_is_what_a_vqe_is_checked_against():
+    """A converged variational answer means nothing until compared with one."""
+    from blueqat import Z, ground_state_energy
+    from blueqat.utils import QaoaAnsatz, Vqe
+    hamiltonian = 1.0 * Z[0] * Z[1] - 0.5 * Z[1] * Z[2]
+    exact = ground_state_energy(hamiltonian)
+    result = Vqe(QaoaAnsatz(hamiltonian, step=3), seed=0).run(max_iter=200)
+    assert float(result.loss_history[-1]) >= exact - 1e-9
+    assert float(result.loss_history[-1]) == pytest.approx(exact, abs=0.2)
+
+
+@pytest.mark.parametrize('qubo,value,bits', [
+    ([[1, -2], [0, 3]], 0.0, (0, 0)),
+    ({(0, 0): -1, (1, 1): -1, (0, 1): 2}, -1.0, (1, 0)),
+    ({(0, 0): -1, (1, 1): -1}, -2.0, (1, 1)),
+])
+def test_the_exhaustive_minimum(qubo, value, bits):
+    from blueqat import exhaustive_minimum
+    assert exhaustive_minimum(qubo) == (pytest.approx(value), bits)
+
+
+def test_a_tie_is_broken_the_same_way_every_time():
+    """Arbitrary but fixed: a solver finding a different optimum of equal
+    value has not disagreed with this one."""
+    from blueqat import exhaustive_minimum
+    value, bits = exhaustive_minimum({(0, 0): -1, (1, 1): -1, (0, 1): 2})
+    assert value == pytest.approx(-1.0)
+    assert bits == (1, 0)
+    assert exhaustive_minimum({(0, 0): -1, (1, 1): -1, (0, 1): 2})[1] == bits
+
+
+def test_they_are_exported_where_they_will_be_found():
+    import blueqat
+    for name in ('from_qubo', 'ground_state_energy', 'exhaustive_minimum'):
+        assert hasattr(blueqat, name) and name in blueqat.__all__

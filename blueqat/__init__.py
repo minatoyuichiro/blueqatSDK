@@ -29,7 +29,8 @@ from blueqat.backends.draw_backend import DrawCircuit
 # main part of the surface rather than a utility. They lived only in
 # `blueqat.utils` -- a name that says "miscellany" -- and finding them there
 # was measured taking a new user fifteen minutes.
-from blueqat.utils import I, X, Y, Z, Expr, Term, parse_hamiltonian
+from blueqat.utils import (I, X, Y, Z, Expr, Term, parse_hamiltonian,
+                           exhaustive_minimum, from_qubo, ground_state_energy)
 
 #: Which end of a counts key is qubit 0. blueqat writes ``"q0_last"``: the
 #: *rightmost* character is qubit 0, so ``Circuit(3).x[0].m[:].run(shots=1)``
@@ -97,6 +98,9 @@ __all__ = [
     "Expr",
     "Term",
     "parse_hamiltonian",
+    "from_qubo",
+    "ground_state_energy",
+    "exhaustive_minimum",
     "measure_bit_order",
     "Circuit",
     "BlueqatGlobalSetting",
