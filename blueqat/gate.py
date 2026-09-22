@@ -27,6 +27,27 @@ from .typing import Targets
 _Op = TypeVar('_Op', bound='Operation')
 
 
+
+def _single_param(cls, params: tuple, what: str = 'parameter'):
+    """The one parameter a gate takes, or an error naming what went wrong.
+
+    Extra positional arguments used to be dropped in silence. That matters
+    because ``circuit.ry(theta, qubit)`` is how several other toolkits are
+    written, and blueqat spells the qubit as a subscript: ``ry(theta)[qubit]``.
+    Accepting the other spelling and quietly discarding the qubit produced a
+    circuit missing its gate, and was reported as blueqat "not applying RY".
+    """
+    if len(params) == 1:
+        return params[0]
+    if not params:
+        raise ValueError(f"{cls.__name__} takes one {what}, and none was given.")
+    raise ValueError(
+        f"{cls.__name__} takes one {what}, but {len(params)} were given "
+        f"({', '.join(repr(p) for p in params)}). In blueqat the qubit is a "
+        f"subscript, not an argument: write "
+        f"`circuit.{cls.lowername}({params[0]!r})[{params[1]!r}]`.")
+
+
 class Operation:
     """Abstract quantum circuit operation class."""
 
@@ -197,7 +218,7 @@ class Mat1Gate(OneQubitGate):
     def create(cls, targets: Targets, params: tuple, options: Optional[dict] = None) -> 'Mat1Gate':
         if options:
             raise ValueError(f"{cls.__name__} doesn't take options")
-        return cls(targets, params[0])
+        return cls(targets, _single_param(cls, params))
 
     def dagger(self):
         # mish() を .mT に修正し、テンソルの随伴行列を正しく取得
@@ -219,7 +240,7 @@ class PhaseGate(OneQubitGate):
     def create(cls, targets: Targets, params: tuple, options: Optional[dict] = None) -> 'PhaseGate':
         if options:
             raise ValueError(f"{cls.__name__} doesn't take options")
-        return cls(targets, params[0])
+        return cls(targets, _single_param(cls, params))
 
     def dagger(self):
         return PhaseGate(self.targets, -self.theta)
@@ -247,7 +268,7 @@ class RXGate(OneQubitGate):
     def create(cls, targets: Targets, params: tuple, options: Optional[dict] = None) -> 'RXGate':
         if options:
             raise ValueError(f"{cls.__name__} doesn't take options")
-        return cls(targets, params[0])
+        return cls(targets, _single_param(cls, params))
 
     def dagger(self):
         return RXGate(self.targets, -self.theta)
@@ -272,7 +293,7 @@ class RYGate(OneQubitGate):
     def create(cls, targets: Targets, params: tuple, options: Optional[dict] = None) -> 'RYGate':
         if options:
             raise ValueError(f"{cls.__name__} doesn't take options")
-        return cls(targets, params[0])
+        return cls(targets, _single_param(cls, params))
 
     def dagger(self):
         return RYGate(self.targets, -self.theta)
@@ -297,7 +318,7 @@ class RZGate(OneQubitGate):
     def create(cls, targets: Targets, params: tuple, options: Optional[dict] = None) -> 'RZGate':
         if options:
             raise ValueError(f"{cls.__name__} doesn't take options")
-        return cls(targets, params[0])
+        return cls(targets, _single_param(cls, params))
 
     def dagger(self):
         return RZGate(self.targets, -self.theta)
@@ -614,7 +635,7 @@ class CPhaseGate(TwoQubitGate):
 
     @classmethod
     def create(cls, targets: Targets, params: tuple, options: Optional[dict] = None) -> 'CPhaseGate':
-        return cls(targets, params[0])
+        return cls(targets, _single_param(cls, params))
 
     def dagger(self):
         return CPhaseGate(self.targets, -self.theta)
@@ -635,7 +656,7 @@ class CRXGate(TwoQubitGate):
 
     @classmethod
     def create(cls, targets: Targets, params: tuple, options: Optional[dict] = None) -> 'CRXGate':
-        return cls(targets, params[0])
+        return cls(targets, _single_param(cls, params))
 
     def dagger(self):
         return CRXGate(self.targets, -self.theta)
@@ -666,7 +687,7 @@ class CRYGate(TwoQubitGate):
 
     @classmethod
     def create(cls, targets: Targets, params: tuple, options: Optional[dict] = None) -> 'CRYGate':
-        return cls(targets, params[0])
+        return cls(targets, _single_param(cls, params))
 
     def dagger(self):
         return CRYGate(self.targets, -self.theta)
@@ -697,7 +718,7 @@ class CRZGate(TwoQubitGate):
 
     @classmethod
     def create(cls, targets: Targets, params: tuple, options: Optional[dict] = None) -> 'CRZGate':
-        return cls(targets, params[0])
+        return cls(targets, _single_param(cls, params))
 
     def dagger(self):
         return CRZGate(self.targets, -self.theta)
@@ -1066,7 +1087,7 @@ class ExchangeGate(TwoQubitGate, IFallbackOperation):
     def create(cls, targets: Targets, params: tuple, options: Optional[dict] = None) -> 'ExchangeGate':
         if options:
             raise ValueError(f"{cls.__name__} doesn't take options")
-        return cls(targets, params[0])
+        return cls(targets, _single_param(cls, params))
 
     def dagger(self):
         return ExchangeGate(self.targets, -self.theta)
