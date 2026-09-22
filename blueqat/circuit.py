@@ -630,11 +630,21 @@ class _AncillaContext:
 
 
 class _GateWrapper(CircuitOperation[Circuit]):
+    """A gate waiting to be told which qubits it acts on.
+
+    `circuit.ry(theta)` produces one of these; `[0]` is what actually appends
+    the gate. Forgetting the subscript therefore adds nothing, and the circuit
+    runs and returns a perfectly ordinary answer for the gates that were
+    added -- which reads as "the gate had no effect" and has been reported as
+    exactly that. So an unsubscripted wrapper says so when it is discarded.
+    """
+
     def __init__(self, circuit: Circuit, op_type: Type['Operation']):
         self.circuit = circuit
         self.op_type = op_type
         self.params = ()
         self.options = None
+        self._applied = False
 
     def __call__(self, *args, **kwargs) -> '_GateWrapper':
         self.params = args
@@ -643,11 +653,51 @@ class _GateWrapper(CircuitOperation[Circuit]):
         return self
 
     def __getitem__(self, targets) -> 'Circuit':
+        self._applied = True
         self.circuit.ops.append(
             self.op_type.create(targets, self.params, self.options))
         self.circuit.n_qubits = max(
             gate.get_maximum_index(targets) + 1, self.circuit.n_qubits)
         return self.circuit
+
+    def __del__(self) -> None:
+        # Nothing was appended, so the circuit is quietly missing a gate. The
+        # alternative to saying so is a run that succeeds and answers as
+        # though the gate were not there, which is indistinguishable from the
+        # gate having no effect.
+        if getattr(self, '_applied', True):
+            return
+        try:
+            import warnings
+            warnings.warn(
+                f"`.{self.op_type.lowername}` was written without saying which "
+                f"qubits it acts on, so no gate was added. Write "
+                f"`circuit.{self._suggestion()}`. Several other toolkits pass "
+                f"the qubit as an argument; blueqat spells it as a subscript, "
+                f"and the difference is silent -- the circuit runs and gives "
+                f"the answer for a circuit without this gate.",
+                SyntaxWarning, stacklevel=2)
+        except Exception:                                # pragma: no cover
+            pass
+
+    def _suggestion(self) -> str:
+        """The call the author probably meant, built from what they wrote.
+
+        A warning that names the mistake is worth less than one that spells
+        the fix, and here the fix can be derived: whatever trailing integers
+        were passed are almost certainly the qubits.
+        """
+        name = self.op_type.lowername
+        params = list(self.params)
+        qubits = []
+        while params and isinstance(params[-1], int) and not isinstance(params[-1], bool):
+            qubits.insert(0, params.pop())
+        if not qubits:
+            qubits = [0]
+        subscript = ', '.join(str(q) for q in qubits)
+        if params:
+            return f"{name}({', '.join(repr(p) for p in params)})[{subscript}]"
+        return f"{name}[{subscript}]"
 
     def __str__(self) -> str:
         args_str = str(self.params) if self.params else ""

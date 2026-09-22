@@ -15,6 +15,8 @@
 
 from collections import Counter
 
+
+import warnings
 import pytest
 import torch
 
@@ -455,3 +457,88 @@ def test_reversing_the_statevector_keeps_the_gradient():
     state = Circuit(2).ry(angle)[0].statevector(bit_order='q0_first')
     (torch.abs(state) ** 2).sum().backward()
     assert angle.grad is not None
+
+
+# --- a gate written without its qubits -------------------------------------
+#
+# `circuit.ry(theta, 0)` is how several other toolkits are written. blueqat
+# spells the qubit as a subscript, so that call built a gate and threw it
+# away: no error, no warning, and a circuit quietly missing it. A model
+# working a benchmark hit this, saw `Circuit().ry(1.0, 0).run()` return
+# `[1.+0.j]`, concluded that blueqat does not apply RY, and rewrote its whole
+# ansatz in numpy. It was not wrong about what it saw.
+
+@pytest.mark.parametrize('call,suggestion', [
+    ('c.ry(1.0, 0)', 'ry(1.0)[0]'),
+    ('c.rx(0.5, 2)', 'rx(0.5)[2]'),
+    ('c.h(0)', 'h[0]'),
+    ('c.x(0)', 'x[0]'),
+    ('c.cx(0, 1)', 'cx[0, 1]'),
+    ('c.ccx(0, 1, 2)', 'ccx[0, 1, 2]'),
+])
+def test_a_gate_without_a_subscript_says_so_and_spells_the_fix(call, suggestion):
+    import gc
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        c = Circuit()
+        eval(call)
+        del c
+        gc.collect()
+    messages = [str(w.message) for w in caught if issubclass(w.category, SyntaxWarning)]
+    assert len(messages) == 1
+    assert suggestion in messages[0]
+    assert 'no gate was added' in messages[0]
+
+
+def test_correctly_written_gates_say_nothing():
+    import gc
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        c = Circuit(2).ry(1.0)[0].h[1].cx[0, 1].m[:]
+        del c
+        gc.collect()
+    assert [w for w in caught if issubclass(w.category, SyntaxWarning)] == []
+
+
+def test_an_empty_circuit_is_not_a_mistake():
+    """Deliberately not warned about. Running a circuit with no gates is a
+    real question -- it is the |0...0> state, and `Circuit().expect(Z[0])`
+    answering 1 was itself a fix. Warning here would fire where nothing is
+    wrong, and the discarded-gate warning already catches the actual error."""
+    import gc
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        state = Circuit(3).run()
+        del state
+        gc.collect()
+    assert [w for w in caught if issubclass(w.category, SyntaxWarning)] == []
+
+
+def test_the_other_toolkit_spelling_is_refused_when_it_is_subscripted():
+    """`ry(theta, qubit)[q]` used to work by silently dropping the qubit
+    argument, which is the same mistake surviving into a circuit that looks
+    right."""
+    with pytest.raises(ValueError) as exc:
+        Circuit(1).ry(1.0, 0)[0]
+    message = str(exc.value)
+    assert 'takes one parameter' in message
+    assert 'subscript, not an argument' in message
+    assert 'ry(1.0)[0]' in message
+
+
+def test_a_rotation_with_no_angle_says_which_is_missing():
+    with pytest.raises(ValueError, match='takes one parameter, and none was given'):
+        Circuit(1).ry()[0]
+
+
+def test_the_benchmark_sequence_now_reports_itself():
+    """The exact three lines that led to the misdiagnosis."""
+    import gc
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        c3 = Circuit()
+        c3.ry(1.0, 0)
+        state = c3.run()
+        gc.collect()
+    assert state.shape == (1, )            # still a zero-qubit circuit
+    assert any('no gate was added' in str(w.message) for w in caught)
