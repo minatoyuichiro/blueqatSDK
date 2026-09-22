@@ -35,7 +35,10 @@ def circuit_to_unitary(circ: Circuit, *runargs: Any, **runkwargs: Any) -> np.nda
         np.ndarray: The unitary matrix representing the total circuit operation.
     """
     runkwargs.setdefault('returns', 'statevector')
-    runkwargs.setdefault('ignore_global', False)
+    # `ignore_global` used to be defaulted here and no backend has ever read
+    # it: `ignore_global_phase` is a separate utility, not a run argument.
+    # Passing it cost nothing and meant nothing, which is why it survived --
+    # until `warn_unknown_arguments` said so 1320 times in one test run.
     
     n_qubits = circ.n_qubits
     if n_qubits == 0:

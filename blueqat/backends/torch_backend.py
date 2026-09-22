@@ -623,8 +623,18 @@ class TorchBackend(Backend):
             return last_state, shots_result
         return shots_result
 
+    #: What `run` reads. Anything else was accepted and will not be used,
+    #: which for a misspelling is how a typo becomes a wrong answer with
+    #: nothing to read -- see `warn_unknown_arguments`.
+    KNOWN_ARGUMENTS = frozenset({
+        'amplitude', 'bit_order', 'device', 'dtype', 'hamiltonian', 'initial',
+        'mode', 'seed', 'shots', 'returns',
+    })
+
     def run(self, gates: List[Operation], n_qubits: int, shots: Optional[int] = None,
             returns: Optional[str] = None, **kwargs) -> Any:
+        from .backendbase import warn_unknown_arguments
+        warn_unknown_arguments(kwargs, self.KNOWN_ARGUMENTS, self.mode)
 
         device = kwargs.get("device", self.device)
         run_mode = kwargs.get("mode", self.mode)

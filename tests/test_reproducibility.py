@@ -542,3 +542,63 @@ def test_the_benchmark_sequence_now_reports_itself():
         gc.collect()
     assert state.shape == (1, )            # still a zero-qubit circuit
     assert any('no gate was added' in str(w.message) for w in caught)
+
+
+# --- an argument that was accepted and will not be used --------------------
+#
+# The same disease as a gate written without its qubits, one level up. A
+# misspelled keyword is accepted and dropped, so `run(shot=100)` returns a
+# statevector when counts were asked for, `run(seeed=1)` is not seeded and
+# looks seeded, and `run(bit_oder=...)` quietly gives the other bit order --
+# the mistake that has already cost one benchmark answer.
+
+@pytest.mark.parametrize('bad,good', [
+    ('shot', 'shots'),
+    ('seeed', 'seed'),
+    ('bit_oder', 'bit_order'),
+    ('hamiltonain', 'hamiltonian'),
+])
+def test_a_misspelled_argument_is_named_with_its_correction(bad, good):
+    circuit = Circuit(2).h[0].cx[0, 1].m[:]
+    with pytest.warns(UserWarning) as caught:
+        circuit.run(**{bad: 1}, shots=4, seed=1)
+    message = str(caught[0].message)
+    assert f"'{bad}'" in message
+    assert f"did you mean '{good}'" in message
+    assert 'does not use' in message
+
+
+def test_correct_arguments_say_nothing():
+    circuit = Circuit(2).h[0].cx[0, 1].m[:]
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', UserWarning)
+        circuit.run(shots=4, seed=1, bit_order='q0_first')
+        circuit.run()
+        circuit.run(backend='density', shots=4)
+
+
+def test_an_argument_with_no_near_miss_is_still_reported():
+    """It is not only typos: an argument meant for another backend is dropped
+    just as quietly."""
+    with pytest.warns(UserWarning, match='does not use'):
+        Circuit(2).h[0].run(wildly_unrelated=True)
+
+
+def test_the_warning_says_what_the_backend_does_accept():
+    with pytest.warns(UserWarning) as caught:
+        Circuit(2).h[0].run(shot=4)
+    message = str(caught[0].message)
+    for name in ('shots', 'seed', 'bit_order'):
+        assert name in message
+
+
+def test_circuit_to_unitary_no_longer_passes_an_argument_nobody_reads():
+    """`ignore_global` was defaulted into every call and read by nothing --
+    `ignore_global_phase` is a separate utility. It cost nothing and meant
+    nothing, which is how it survived; the check above found it by warning
+    1320 times in one test run."""
+    from blueqat.circuit_funcs import circuit_to_unitary
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', UserWarning)
+        matrix = circuit_to_unitary(Circuit(2).h[0].cx[0, 1])
+    assert matrix.shape == (4, 4)

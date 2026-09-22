@@ -109,8 +109,17 @@ class DensityMatrixBackend(Backend):
     #: than a statevector, so that e.g. `Circuit.probs` reads the diagonal.
     returns_density_matrix = True
 
+    #: What `run` reads; see `warn_unknown_arguments` for why the rest is
+    #: worth saying out loud rather than dropping.
+    KNOWN_ARGUMENTS = frozenset({
+        'bit_order', 'device', 'dtype', 'hamiltonian', 'initial', 'noise',
+        'noise_scale', 'quasi_static', 'returns', 'samples', 'seed', 'shots',
+    })
+
     def run(self, gates: List[Operation], n_qubits: int, *args: Any, **kwargs: Any) -> Any:
         from ..noise import as_noise_model
+        from .backendbase import warn_unknown_arguments
+        warn_unknown_arguments(kwargs, self.KNOWN_ARGUMENTS, 'density')
 
         n_qubits = max(n_qubits, 1)
         if n_qubits > MAX_QUBITS:

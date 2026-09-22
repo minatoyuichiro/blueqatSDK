@@ -99,6 +99,36 @@ class Backend(ABC):
         return self._postprocess_run(ctx)
 
 
+
+def warn_unknown_arguments(kwargs: dict, known, backend: str) -> None:
+    """Say when a keyword argument was accepted and will not be used.
+
+    Silently dropping one is how a typo becomes a wrong answer with nothing to
+    read: ``run(shot=100)`` returns a statevector when counts were asked for,
+    ``run(seeed=1)`` is not seeded and looks it only if someone reruns, and
+    ``run(bit_oder='q0_first')`` quietly gives the other bit order -- the
+    mistake that has already cost a benchmark answer once.
+
+    A near-miss is named, because a typo is far more likely than an argument
+    meant for somewhere else.
+    """
+    import difflib
+    import warnings
+    unknown = sorted(set(kwargs) - set(known))
+    if not unknown:
+        return
+    parts = []
+    for name in unknown:
+        close = difflib.get_close_matches(name, sorted(known), n=1, cutoff=0.7)
+        parts.append(f"{name!r}" + (f" (did you mean {close[0]!r}?)" if close else ""))
+    warnings.warn(
+        f"backend {backend!r} does not use " + ", ".join(parts)
+        + f". It accepts {', '.join(sorted(known))}. The run continues as if "
+        f"the argument had not been given, which for a misspelling means the "
+        f"answer is for a question nobody asked.",
+        UserWarning, stacklevel=4)
+
+
 def register_backend(name: str, backend_cls: Type[Backend], overwrite: bool = False) -> None:
     """Register a new backend plugin dynamically.
     
