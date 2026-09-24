@@ -123,10 +123,49 @@ class Circuit:
 
         return runner
 
+
+    def _warn_pending_gates(self) -> None:
+        """Say if a gate is still waiting for its qubits when the circuit runs.
+
+        The wrapper reports itself when it is collected, which covers the
+        common `c.ry(0.3, 0)` on a line of its own. It does not cover a
+        wrapper somebody is still holding -- and a notebook holds the last
+        expression of every cell in `_`, which is precisely where this gets
+        typed and nothing appears to happen. Running is the other moment the
+        question can be asked.
+        """
+        pending = getattr(self, '_pending_gates', None)
+        if not pending:
+            return
+        waiting = [w for w in pending if not getattr(w, '_applied', True)]
+        if not waiting:
+            return
+        import warnings
+        for wrapper in waiting:
+            wrapper._applied = True          # reported once, not twice
+            warnings.warn(
+                f"running a circuit while `.{wrapper.op_type.lowername}` is "
+                f"still waiting for its qubits, so that gate is not in it. "
+                f"Write `circuit.{wrapper._suggestion()}`.",
+                SyntaxWarning, stacklevel=3)
+
     def __getattr__(self, name: str) -> CircuitOperation[Any]:
         op_type = get_op_type(name)
         if op_type:
-            return _GateWrapper(self, op_type)
+            wrapper = _GateWrapper(self, op_type)
+            # Held weakly, so that tracking a wrapper cannot keep it alive.
+            # `run` asks whether any are still waiting for their qubits: a
+            # wrapper that is discarded reports itself when collected, but one
+            # the caller happens to be holding does not, and a notebook holds
+            # the last expression of every cell in `_`. That is exactly where
+            # somebody types `c.ry(0.3, 0)` and sees nothing happen.
+            try:
+                self._pending_gates.add(wrapper)
+            except AttributeError:
+                import weakref
+                object.__setattr__(self, '_pending_gates', weakref.WeakSet())
+                self._pending_gates.add(wrapper)
+            return wrapper
         if name in GLOBAL_MACROS:
             macro = update_wrapper(partial(GLOBAL_MACROS[name], self), GLOBAL_MACROS[name])
             return cast(CircuitOperation[Any], macro)
@@ -214,6 +253,10 @@ class Circuit:
         does not know the argument and dropped it, returning a noiseless answer
         with no error -- the failure this exists to prevent.
         """
+        # Every entry point -- run, statevector, probs, shots, expect --
+        # comes through here, so asking once here cannot be bypassed by a new
+        # one being added later.
+        self._warn_pending_gates()
         from blueqat.backends import DEFAULT_BACKEND_NAME
 
         if backend is not None:

@@ -602,3 +602,139 @@ def test_circuit_to_unitary_no_longer_passes_an_argument_nobody_reads():
         warnings.simplefilter('error', UserWarning)
         matrix = circuit_to_unitary(Circuit(2).h[0].cx[0, 1])
     assert matrix.shape == (4, 4)
+
+
+def test_a_gate_still_waiting_is_caught_when_the_circuit_runs():
+    """The wrapper reports itself when collected, which misses the case where
+    somebody is still holding it -- and a notebook holds the last expression
+    of every cell in `_`, which is exactly where this gets typed. Running is
+    the other moment the question can be asked."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        circuit = Circuit(1)
+        held = circuit.ry(0.3, 0)          # kept alive, as `_` would keep it
+        state = circuit.run()
+        assert held is not None
+    messages = [str(w.message) for w in caught if issubclass(w.category, SyntaxWarning)]
+    assert len(messages) == 1
+    assert 'still waiting for its qubits' in messages[0]
+    assert 'ry(0.3)[0]' in messages[0]
+    assert state.shape == (2, )            # and the run still happened
+
+
+@pytest.mark.parametrize('finish', [
+    lambda c: c.run(),
+    lambda c: c.statevector(),
+    lambda c: c.m[:].run(shots=2),
+])
+def test_every_way_of_running_asks_the_question(finish):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        circuit = Circuit(1)
+        held = circuit.ry(0.3, 0)
+        finish(circuit)
+        assert held is not None
+    assert [w for w in caught if issubclass(w.category, SyntaxWarning)]
+
+
+def test_it_is_reported_once_not_on_every_run():
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        circuit = Circuit(1)
+        held = circuit.ry(0.3, 0)
+        circuit.run()
+        circuit.run()
+        circuit.run()
+        assert held is not None
+    assert len([w for w in caught if issubclass(w.category, SyntaxWarning)]) == 1
+
+
+def test_tracking_a_wrapper_does_not_keep_it_alive():
+    """Held weakly: a circuit that has built many gates must not accumulate
+    them."""
+    import gc
+    circuit = Circuit(1)
+    for _ in range(50):
+        circuit.h[0]
+    gc.collect()
+    pending = getattr(circuit, '_pending_gates', None)
+    assert pending is not None
+    assert len(pending) < 50
+
+
+# --- which blueqat is this -------------------------------------------------
+#
+# 2.1.3 was cut in July and then carried 17,666 added lines without moving, so
+# "which 2.1.3?" could only be answered by reading `direct_url.json` by hand.
+# It was asked to settle a bug one session could reproduce and another could
+# not.
+
+def test_the_version_moved():
+    import blueqat
+    assert blueqat.__version__ != '2.1.3'
+    major, minor, patch = (int(p) for p in blueqat.__version__.split('.'))
+    assert (major, minor) >= (2, 2)
+
+
+def test_version_info_says_which_build_and_where_it_came_from():
+    import blueqat
+    info = blueqat.version_info()
+    assert set(info) == {'version', 'revision', 'source', 'path'}
+    assert info['version'] == blueqat.__version__
+    assert info['source'] in (None, 'checkout', 'install')
+    assert info['path'].endswith('blueqat')
+    if info['revision'] is None:
+        assert info['source'] is None
+    else:
+        assert info['source'] is not None
+
+
+def test_a_checkout_reports_its_commit():
+    """Run from the repository, so this is the case under test here."""
+    from blueqat import _version
+    revision = _version._revision_from_source()
+    assert revision is not None
+    assert len(revision.split('-')[0]) == 40
+
+
+def test_the_revision_does_not_depend_on_the_working_directory():
+    """A source checkout carries a `blueqat.egg-info` that shadows an
+    installed `dist-info` whenever the working directory is the repository.
+    Before the revision was decided from the imported file, the same call
+    answered differently depending on where it ran -- and could have reported
+    an installed commit while running checkout code."""
+    import os
+    import subprocess
+    import sys
+    script = ('import sys; sys.path.insert(0, %r); import blueqat; '
+              'print(blueqat.version_info()["revision"], '
+              'blueqat.version_info()["source"])' % os.path.dirname(
+                  os.path.dirname(os.path.abspath(__file__))))
+    answers = set()
+    for cwd in (os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '/tmp'):
+        out = subprocess.run([sys.executable, '-c', script], cwd=cwd,
+                             capture_output=True, text=True, timeout=60)
+        answers.add(out.stdout.strip())
+    assert len(answers) == 1, answers
+
+
+def test_the_distribution_is_matched_to_the_imported_file():
+    """`distribution('blueqat')` returns the first match, which may describe a
+    different copy from the one imported."""
+    from blueqat import _version
+    dist = _version._distribution_containing_this_file()
+    if dist is None:
+        return                     # running from a checkout with no install
+    import pathlib
+    root = pathlib.Path(dist.locate_file('')).resolve()
+    assert root in pathlib.Path(_version.__file__).resolve().parents
+
+
+def test_a_missing_direct_url_answers_none_rather_than_guessing():
+    from blueqat import _version
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(_version, '_distribution_containing_this_file', lambda: None)
+    try:
+        assert _version._revision_from_metadata() is None
+    finally:
+        monkeypatch.undo()

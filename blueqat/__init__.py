@@ -14,7 +14,7 @@
 """Blueqat Quantum Computing SDK core module."""
 
 # _version.py からバージョン情報を引っ張ってくる
-from blueqat._version import __version__
+from blueqat._version import __version__, installed_revision, version_info
 
 # 1. コアクラスとグローバル設定を公開
 # (BlueqatGlobalSetting を circuit からインポートして追加します)
@@ -90,6 +90,8 @@ def measure_bit_order() -> str:
 # 公開するシンボルを明示的に指定（テスト環境の検出をより確実にします）
 __all__ = [
     "__version__",
+    "installed_revision",
+    "version_info",
     "BIT_ORDER",
     "I",
     "X",
